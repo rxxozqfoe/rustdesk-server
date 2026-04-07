@@ -1,0 +1,72 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug hbbs (rendezvous)",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["build", "--bin=hbbs"],
+                "filter": { "name": "hbbs", "kind": "bin" }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_LOG": "debug",
+                "RUST_BACKTRACE": "1",
+                "DB_URL": "db_v2.sqlite3"
+            }
+        },
+        {
+            "name": "Debug hbbr (relay)",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["build", "--bin=hbbr"],
+                "filter": { "name": "hbbr", "kind": "bin" }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_LOG": "debug",
+                "RUST_BACKTRACE": "1"
+            }
+        },
+        {
+            "name": "Debug rustdesk-utils",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["build", "--bin=rustdesk-utils"],
+                "filter": { "name": "rustdesk-utils", "kind": "bin" }
+            },
+            "args": ["genkeypair"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug unit tests (lib)",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["test", "--no-run", "--lib"],
+                "filter": { "kind": "lib" }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug integration tests (jwt_tests)",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["test", "--no-run", "--test=jwt_tests"],
+                "filter": { "name": "jwt_tests", "kind": "test" }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
