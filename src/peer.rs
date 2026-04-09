@@ -81,6 +81,11 @@ impl PeerMap {
             }
             db
         });
+        let db = if db.starts_with("sqlite://") {
+            db
+        } else {
+            format!("sqlite://{db}")
+        };
         log::info!("DB_URL={}", db);
         let pm = Self {
             map: Default::default(),

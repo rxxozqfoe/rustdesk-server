@@ -85,8 +85,27 @@
 
 ## 如何自行构建
 
+首次克隆项目后，需要初始化子模块和数据库：
+
+```bash
+git submodule update --init --recursive
+cargo install sqlx-cli --no-default-features --features sqlite    # 安装 sqlx-cli（仅首次）
+make init-db                                                       # 创建 SQLite 数据库并运行迁移
+```
+
+然后即可编译：
+
 ```bash
 cargo build --release
+```
+
+> **注意：** 本项目使用 sqlx 编译期 SQL 校验（online mode），编译前必须执行 `make init-db` 以确保本地存在包含正确 schema 的数据库。
+
+其他数据库相关命令：
+
+```bash
+make migrate    # 运行待执行的迁移
+make reset-db   # 删除并重建数据库
 ```
 
 执行后会在target/release目录下生成三个对应平台的可执行程序

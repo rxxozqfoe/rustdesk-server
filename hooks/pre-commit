@@ -1,0 +1,13 @@
+#!/bin/sh
+
+# Auto-update sqlx offline query data when database.rs is modified
+if git diff --cached --name-only | grep -q 'src/database.rs'; then
+    echo "database.rs changed, running cargo sqlx prepare..."
+    cargo sqlx prepare
+    if [ $? -ne 0 ]; then
+        echo "ERROR: cargo sqlx prepare failed"
+        exit 1
+    fi
+    git add .sqlx/
+    echo ".sqlx/ updated and staged"
+fi
