@@ -9,7 +9,11 @@ Fork of RustDesk Server with API integration enhancements: JWT-based authenticat
 ## Build & Development Commands
 
 ```bash
-# Build (requires submodules: git submodule update --init --recursive)
+# First-time setup (requires submodules + database)
+git submodule update --init --recursive
+make init-db                             # Create SQLite DB and run migrations
+
+# Build
 cargo build
 cargo build --release    # LTO enabled, stripped binaries
 
@@ -38,7 +42,7 @@ Three binaries from a single workspace:
 - `src/rendezvous_server.rs` — Core rendezvous logic (largest file ~62KB): peer registration, WebSocket/TCP handling, encryption, IP blocking
 - `src/relay_server.rs` — Relay logic with bandwidth limiting and blacklist management
 - `src/common.rs` — Shared utilities, CLI argument parsing, config file loading (INI format via `--config`)
-- `src/database.rs` — SQLite peer database with deadpool connection pooling
+- `src/database.rs` — SQLite peer database with sqlx connection pooling and auto-migration
 - `src/peer.rs` — Peer state management and IP-based blocking/rate limiting
 - `src/jwt.rs` — JWT token generation/validation for API authentication
 
@@ -60,9 +64,29 @@ Environment variables (also configurable via INI file with `--config`):
 | `LIMIT_SPEED` / `SINGLE_BANDWIDTH` / `TOTAL_BANDWIDTH` | Rate limiting |
 | `DOWNGRADE_START_CHECK` / `DOWNGRADE_THRESHOLD` | Connection downgrade tuning |
 
+## Database (SQLx Online Mode)
+
+Schema is managed via sqlx migrations in `migrations/`. First-time setup:
+
+```bash
+make init-db       # sqlx database create + migrate run
+```
+
+Other database commands:
+
+```bash
+make migrate       # Run pending migrations
+make reset-db      # Drop and recreate database
+```
+
+- `DATABASE_URL` in `.env` points to the SQLite file (default: `sqlite:./db_v2.sqlite3`)
+- `sqlx::query!` macros validate SQL at compile time against the live database (online mode)
+- The server also runs `sqlx::migrate!()` at startup, so `cargo run` auto-migrates
+- `.sqlx/` offline cache is not used — CI must run `make init-db` before `cargo build`
+
 ## Notable Dependencies
 
-- **sqlx 0.6** with compile-time SQL validation — changes to queries require a valid `DATABASE_URL` in `.env`
+- **sqlx 0.8** with compile-time SQL validation (online mode) — requires `make init-db` before first build
 - **sodiumoxide** for ed25519 signing and encryption
 - **axum 0.5** for HTTP endpoints
 - **tokio-tungstenite 0.17** for WebSocket support

@@ -86,8 +86,27 @@ Self-host your own RustDesk server, it is free and open source.
 
 ## How to build manually
 
+After cloning the project for the first time, initialize submodules and the database:
+
+```bash
+git submodule update --init --recursive
+cargo install sqlx-cli --no-default-features --features sqlite    # Install sqlx-cli (first time only)
+make init-db                                                       # Create SQLite DB and run migrations
+```
+
+Then build:
+
 ```bash
 cargo build --release
+```
+
+> **Note:** This project uses sqlx compile-time SQL validation (online mode). You must run `make init-db` before the first build to ensure a local database with the correct schema exists.
+
+Other database commands:
+
+```bash
+make migrate    # Run pending migrations
+make reset-db   # Drop and recreate the database
 ```
 
 Three executables will be generated in target/release.
