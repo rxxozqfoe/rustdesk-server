@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 Fork of RustDesk Server with API integration enhancements: JWT-based authentication, mandatory login support (`MUST_LOGIN`), and WebSocket client support (client >= 1.4.1). Companion API project: https://github.com/lejianwen/rustdesk-api
+The main branch is "forapi".
 
 ## Build & Development Commands
 
