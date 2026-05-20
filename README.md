@@ -1,43 +1,43 @@
-# rustdesk-server(rxxozqfoe fork)
+# rustdesk-server (rxxozqfoe fork)
 
 [![build](https://github.com/rxxozqfoe/rustdesk-server/actions/workflows/build.yaml/badge.svg)](https://github.com/rxxozqfoe/rustdesk-server/actions/workflows/build.yaml)
 
-本專案 fork 自 [lejianwen/rustdesk-server](https://github.com/lejianwen/rustdesk-server)(再上游為 [rustdesk/rustdesk-server](https://github.com/rustdesk/rustdesk-server)),預設整合分支為 `forapi`。
+A fork of [lejianwen/rustdesk-server](https://github.com/lejianwen/rustdesk-server) (in turn forked from [rustdesk/rustdesk-server](https://github.com/rustdesk/rustdesk-server)). Default integration branch is `forapi`.
 
-## 本 fork 的調整
+## Fork-specific changes
 
-- 解決客戶端登入 `API` 帳號時連線逾時的問題
-- 新增 `MUST_LOGIN` 環境變數:預設 `N`;設為 `Y` 則必須登入才能連線
-- 新增 `RUSTDESK_API_JWT_KEY`:設定後會以 JWT 校驗來自 rustdesk-api 的 token
-- 支援 client WebSocket(client 版本 ≥ 1.4.1)
-- 改採 sqlx online mode,內附 SQLite 遷移(`migrations/`)、編譯前需先執行 `make init-db`
+- Fixes the connection-timeout issue when the client is logged into an `API` account.
+- Adds `MUST_LOGIN` env var: defaults to `N`; set to `Y` to require the client to be logged in before a connection is accepted.
+- Adds `RUSTDESK_API_JWT_KEY`: when set, hbbs validates the JWT issued by rustdesk-api.
+- Adds client WebSocket support (client version ≥ 1.4.1).
+- Switches sqlx to online mode with bundled SQLite migrations (`migrations/`); `make init-db` is required before the first build.
 
-## 發布映像
+## Published image
 
-| 項目 | 內容 |
+| Item | Value |
 |---|---|
-| 發布位置 | `ghcr.io/rxxozqfoe/rustdesk-server` |
-| 架構 | `linux/amd64`、`linux/arm64`(多架構單一映像) |
-| 內容 | 僅含 `hbbs`、`hbbr`、`rustdesk-utils` 三個二進位檔(無 s6 init、無內建 API) |
-| 供應鏈證明 | keyless cosign 簽章 + SBOM + SLSA provenance |
-| 觸發 | 手動 `workflow_dispatch`,或推送 `N.N.N-mycustom.N` tag |
+| Registry | `ghcr.io/rxxozqfoe/rustdesk-server` |
+| Architectures | `linux/amd64`, `linux/arm64` (single multi-arch image) |
+| Contents | `hbbs`, `hbbr`, `rustdesk-utils` binaries only (no s6 init, no bundled API) |
+| Supply-chain attestations | keyless cosign signature + SBOM + SLSA provenance |
+| Triggers | manual `workflow_dispatch`, or push of an `N.N.N-mycustom.N` tag |
 
-> 本 fork **不再發行** s6 變體、Docker Hub 鏡像、Windows 二進位、`.deb` 套件。
-> 若需要 API,請另行部署 [rustdesk-api](https://github.com/lejianwen/rustdesk-api)。
+> This fork **no longer publishes** the s6 variant, Docker Hub images, Windows binaries, or `.deb` packages.
+> If you need an API, deploy [rustdesk-api](https://github.com/lejianwen/rustdesk-api) as a separate service.
 
-## 快速部署
+## Quick deploy
 
-最簡方式是使用本 repo 內的 `docker-compose.yml`(兩個容器 `hbbs` + `hbbr`,共用 `./data:/root` 保存金鑰):
+The simplest path is the two-container `docker-compose.yml` in this repo (`hbbs` + `hbbr`, sharing `./data:/root` for the ed25519 key):
 
 ```bash
 git clone https://github.com/rxxozqfoe/rustdesk-server.git
 cd rustdesk-server
-# 編輯 docker-compose.yml,將 hbbs 的 `-r <relay-server-ip[:21117]>`
-# 換成 client 可連到的 relay 位址,再啟動:
+# Edit docker-compose.yml — replace `-r <relay-server-ip[:21117]>` on
+# the hbbs service with a relay address your clients can reach, then:
 docker compose up -d
 ```
 
-或不用 compose,直接以 `docker run` 啟動兩個容器(`--net=host` 才能啟用 P2P 直連):
+Or skip compose and run the two containers directly (`--net=host` is required for P2P direct connections):
 
 ```bash
 docker run -d --name hbbs --net=host \
@@ -51,70 +51,70 @@ docker run -d --name hbbr --net=host \
   hbbr
 ```
 
-首次啟動會在 `data/` 內自動產生 ed25519 金鑰對(`id_ed25519` / `id_ed25519.pub`)。兩個容器**必須**共用同一個 volume 才能共用同一把金鑰。
+On first start the ed25519 keypair (`id_ed25519` / `id_ed25519.pub`) is generated under `data/`. Both containers **must** share the same volume so they use the same key.
 
-## 連接埠
+## Ports
 
-| 埠 | 協定 | 服務 | 說明 |
+| Port | Protocol | Service | Purpose |
 |---|---|---|---|
-| 21115 | TCP | hbbs | 舊版心跳 |
-| 21116 | TCP + UDP | hbbs | Rendezvous(註冊 / 查找) |
-| 21117 | TCP | hbbr | Relay(中繼) |
+| 21115 | TCP | hbbs | Legacy heartbeat |
+| 21116 | TCP + UDP | hbbs | Rendezvous (registration / lookup) |
+| 21117 | TCP | hbbr | Relay |
 | 21118 | TCP | hbbs | WebSocket |
 | 21119 | TCP | hbbr | WebSocket relay |
 
-## 環境變數
+## Environment variables
 
-| 變數 | 預設 | 用途 |
+| Variable | Default | Purpose |
 |---|---|---|
-| `KEY` | 自動產生 | 連線加密金鑰;`_` 表示接受任何 key(僅測試用) |
-| `RELAY_SERVERS` | — | 以逗號分隔的 relay 位址清單;等同 `hbbs -r` |
-| `MUST_LOGIN` | `N` | `Y` 時要求 client 必須登入 API 才能建立連線 |
-| `RUSTDESK_API_JWT_KEY` | — | rustdesk-api 簽發 JWT 的密鑰;設定後 hbbs 會校驗 token |
-| `DB_URL` | `db_v2.sqlite3` | SQLite 資料庫路徑 |
-| `LIMIT_SPEED` / `SINGLE_BANDWIDTH` / `TOTAL_BANDWIDTH` | — | 流量限制 |
-| `DOWNGRADE_START_CHECK` / `DOWNGRADE_THRESHOLD` | — | 連線降級閾值 |
+| `KEY` | auto-generated | Encryption key for connections; `_` accepts any key (testing only) |
+| `RELAY_SERVERS` | — | Comma-separated relay addresses; equivalent to `hbbs -r` |
+| `MUST_LOGIN` | `N` | When `Y`, clients must be logged into the API before connecting |
+| `RUSTDESK_API_JWT_KEY` | — | JWT signing key from rustdesk-api; when set, hbbs validates tokens |
+| `DB_URL` | `db_v2.sqlite3` | SQLite database path |
+| `LIMIT_SPEED` / `SINGLE_BANDWIDTH` / `TOTAL_BANDWIDTH` | — | Bandwidth limiting |
+| `DOWNGRADE_START_CHECK` / `DOWNGRADE_THRESHOLD` | — | Connection-downgrade thresholds |
 
-亦可使用 INI 設定檔搭配 `--config` 參數;見 `src/common.rs`。
+An INI configuration file can also be passed via `--config`; see `src/common.rs`.
 
-## 自行編譯
+## Build from source
 
 ```bash
 git submodule update --init --recursive
-cargo install sqlx-cli --no-default-features --features sqlite    # 僅首次
-make init-db                                                       # 建立 SQLite 資料庫並執行遷移
+cargo install sqlx-cli --no-default-features --features sqlite    # first time only
+make init-db                                                       # create the SQLite DB and run migrations
 cargo build --release
 ```
 
-> **注意:** 本專案使用 sqlx 編譯期 SQL 校驗(online mode),編譯前必須先執行 `make init-db` 以確保本地存在含正確 schema 的資料庫。
+> **Note:** This project uses sqlx compile-time SQL validation (online mode). You must run `make init-db` before the first build so a local database with the correct schema exists.
 
-其他資料庫指令:
+Other database commands:
 
 ```bash
-make migrate     # 執行待處理的遷移
-make reset-db    # 刪除並重建資料庫
+make migrate     # run pending migrations
+make reset-db    # drop and recreate the database
 ```
 
-編譯產物會出現在 `target/release/`:
+Build output lands in `target/release/`:
 
-- `hbbs` — Rendezvous / ID 伺服器
-- `hbbr` — Relay 中繼伺服器
-- `rustdesk-utils` — 命令列工具(金鑰產生、診斷)
+- `hbbs` — rendezvous / ID server
+- `hbbr` — relay server
+- `rustdesk-utils` — CLI utilities (key generation, diagnostics)
 
-## 與 rustdesk-api 整合
+## Integration with rustdesk-api
 
-本 fork 主要為了搭配 [lejianwen/rustdesk-api](https://github.com/lejianwen/rustdesk-api) 使用。設定 `RUSTDESK_API_JWT_KEY` 後,hbbs 會驗證 client 帶上的 JWT(由 rustdesk-api 簽發);搭配 `MUST_LOGIN=Y` 即可強制要求登入後才能連線。
+This fork exists primarily to integrate with [lejianwen/rustdesk-api](https://github.com/lejianwen/rustdesk-api). Set `RUSTDESK_API_JWT_KEY` so hbbs validates the JWT supplied by the client (signed by rustdesk-api); combine with `MUST_LOGIN=Y` to require authentication before a connection is allowed.
 
-![API 介面](./readme/api.png)
+![API interface](./readme/api.png)
 
-![命令列](./readme/command_simple.png)
+![Command line](./readme/command_simple.png)
 
-## 致謝
+## Credits
 
-- 上游專案 [rustdesk/rustdesk-server](https://github.com/rustdesk/rustdesk-server)
-- 直接 fork 來源 [lejianwen/rustdesk-server](https://github.com/lejianwen/rustdesk-server)
-- 搭配 API [lejianwen/rustdesk-api](https://github.com/lejianwen/rustdesk-api)
+- Upstream: [rustdesk/rustdesk-server](https://github.com/rustdesk/rustdesk-server)
+- Direct fork source: [lejianwen/rustdesk-server](https://github.com/lejianwen/rustdesk-server)
+- Companion API: [lejianwen/rustdesk-api](https://github.com/lejianwen/rustdesk-api)
 
-## 授權
+## License
 
-繼承上游 RustDesk Server 之 AGPL-3.0 授權,詳見 [`LICENSE`](./LICENSE)。
+Inherits the AGPL-3.0 license from upstream RustDesk Server. See [`LICENSE`](./LICENSE).
