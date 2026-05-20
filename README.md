@@ -101,19 +101,10 @@ Build output lands in `target/release/`:
 - `hbbr` — relay server
 - `rustdesk-utils` — CLI utilities (key generation, diagnostics)
 
-## Integration with rustdesk-api
-
-This fork exists primarily to integrate with [lejianwen/rustdesk-api](https://github.com/lejianwen/rustdesk-api). Set `RUSTDESK_API_JWT_KEY` so hbbs validates the JWT supplied by the client (signed by rustdesk-api); combine with `MUST_LOGIN=Y` to require authentication before a connection is allowed.
-
-![API interface](./readme/api.png)
-
-![Command line](./readme/command_simple.png)
-
 ## Credits
 
-- Upstream: [rustdesk/rustdesk-server](https://github.com/rustdesk/rustdesk-server)
+- Upstream RustDesk Server: [rustdesk/rustdesk-server](https://github.com/rustdesk/rustdesk-server)
 - Direct fork source: [lejianwen/rustdesk-server](https://github.com/lejianwen/rustdesk-server)
-- Companion API: [lejianwen/rustdesk-api](https://github.com/lejianwen/rustdesk-api)
 
 ## License
 
