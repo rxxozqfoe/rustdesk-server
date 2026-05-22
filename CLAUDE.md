@@ -23,11 +23,13 @@ cargo run                # hbbs (rendezvous server, default-run)
 cargo run --bin hbbr     # relay server
 cargo run --bin rustdesk-utils  # key generation & diagnostics
 
-# Test, lint, format (matches CI)
-cargo test --all
-cargo fmt --all -- --check
-cargo clippy --all -- -D warnings
-cargo check
+# Lint, format, check (matches CI). `cargo test` is intentionally NOT
+# part of the CI gate. fmt/clippy are scoped to the `hbbs` package
+# (`-p hbbs`) and clippy uses `--no-deps` so the upstream-vendored
+# `libs/hbb_common` submodule is not linted.
+cargo fmt -p hbbs -- --check
+cargo clippy -p hbbs --no-deps -- -D warnings
+cargo check -p hbbs
 ```
 
 ## Architecture
