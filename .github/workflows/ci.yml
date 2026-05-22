@@ -1,0 +1,28 @@
+name: CI
+
+# Runs on every PR to forapi and every push to forapi. Delegates the
+# actual validation to the reusable _validate.yml workflow, so the
+# identical validation pipeline is used by publish.yml before publishing
+# an image.
+#
+# forapi (not main/master) is this fork's default/integration branch.
+#
+# This workflow does NOT build or push an image. The image publish
+# pipeline lives in .github/workflows/publish.yml and triggers only on
+# v*.*.*-mycustom.* tags.
+
+on:
+  push:
+    branches: [forapi]
+  pull_request:
+    branches: [forapi]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    uses: ./.github/workflows/_validate.yml
+    permissions:
+      contents: read
+      security-events: write   # for the scan job to upload SARIF

@@ -1,0 +1,231 @@
+name: publish
+
+# Unified docker-image publish pipeline. Replaces the previous
+# release.yml + build.yaml split now that both shared the same
+# build/sign/verify body and only diverged on tag pattern and a few
+# guards. Triggers ONLY on v*.*.*-mycustom.* tags — there is no
+# workflow_dispatch, so every published image is anchored to a signed
+# git tag.
+#
+# Pipeline:
+#   1. guard               -- reject tags not reachable from forapi
+#   2. validate            -- reuse _validate.yml (lint / clippy / check
+#                             / hadolint+digest-pin / cosign verify-base
+#                             / Trivy block + full SARIF)
+#   3. build-and-push      -- multi-arch (amd64+arm64) build with SBOM
+#                             and SLSA provenance attestations attached,
+#                             pushed to GHCR and keyless cosign-signed
+#   4. verify-published-image
+#                          -- smoke test: re-verify the image signature
+#                             and the SLSA provenance attestation
+#
+# Each stage gates the next, so a tag on a non-forapi commit, a failing
+# lint / check / verify-base-images / Trivy, or a broken build all stop
+# the pipeline before anything is published. cargo-deny (RustSec
+# advisories + sources) lives in its own workflow on a Cargo.* /
+# deny.toml path filter plus a daily schedule, independent of this
+# pipeline.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*-mycustom.*'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+# Top-level permissions are intentionally the least-privileged default.
+# Job-level blocks grant only what each job needs (packages: write to
+# push, id-token: write for keyless cosign signing, security-events:
+# write for SARIF upload). Keeping id-token at job-level only means a
+# future job added without an explicit permissions block will NOT
+# inherit OIDC access.
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------
+  # C+: reject tags that don't point at a commit reachable from forapi.
+  # Protects against tagging a random feature branch or arbitrary SHA
+  # and thereby skipping the PR / forapi CI gate entirely.
+  # -------------------------------------------------------------------
+  guard:
+    name: Tag must be on forapi
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag is an ancestor of forapi
+        run: |
+          set -euo pipefail
+          git fetch origin forapi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/forapi; then
+            echo "::error::Tag $GITHUB_REF_NAME ($GITHUB_SHA) is not reachable from origin/forapi."
+            echo "::error::Only tag commits that are already on forapi (and have passed CI)."
+            exit 1
+          fi
+          echo "OK: tag $GITHUB_REF_NAME is on forapi."
+
+  # -------------------------------------------------------------------
+  # B: reuse the same validation pipeline as ci.yml. Runs lint, check,
+  # verify-base-images and Trivy scan against the tagged commit, so the
+  # gate is identical to what a PR sees -- no drift. (cargo-deny runs
+  # separately, on Cargo.toml/Cargo.lock/deny.toml changes + a daily
+  # schedule.)
+  # -------------------------------------------------------------------
+  validate:
+    needs: guard
+    uses: ./.github/workflows/_validate.yml
+    permissions:
+      contents: read
+      security-events: write
+
+  # -------------------------------------------------------------------
+  # Multi-arch build, push, sign, SBOM + SLSA provenance attest.
+  # The Docker build context needs the hbb_common submodule.
+  # -------------------------------------------------------------------
+  build-and-push:
+    name: Build, push, sign and attest multi-arch image
+    runs-on: ubuntu-24.04
+    needs: validate
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+      id-token: write  # keyless cosign signing via GitHub OIDC
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tag strategy for v*.*.*-mycustom.* tag events:
+      #   - <version>            (strip the leading v; e.g., 1.2.3-mycustom.4)
+      #   - latest               (rolling — always overwrites)
+      #
+      # latest=true (not =auto): v*.*.*-mycustom.* is technically a
+      # semver prerelease, so latest=auto would never promote any of
+      # our tags to :latest. We explicitly want :latest to track the
+      # newest published image, matching the previous build.yaml
+      # behaviour.
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+          flavor: |
+            latest=true
+
+      # Trivy CVE scan already ran in validate (same Dockerfile, same
+      # commit, same base image digests). Go straight to multi-arch
+      # push with SBOM + SLSA provenance attestations attached.
+      #
+      # arm64 is built under QEMU emulation; a Rust LTO release build
+      # is slow there but the project ships linux/amd64,linux/arm64
+      # parity for upstream-compatible images.
+      - name: Build and push multi-arch image
+        id: push
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          sbom: true
+          provenance: mode=max
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+
+      - name: Sign image (keyless)
+        env:
+          COSIGN_YES: "true"
+          IMAGE_DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          echo "Signing $IMAGE_DIGEST_REF"
+          cosign sign "$IMAGE_DIGEST_REF"
+
+  # -------------------------------------------------------------------
+  # Smoke test: re-verify the signature and SLSA provenance attestation
+  # we just produced against the expected workflow identity (tag-push
+  # only — no branch dispatch any more). Catches signing
+  # misconfiguration here rather than in a downstream consumer.
+  # -------------------------------------------------------------------
+  verify-published-image:
+    name: Verify our own signature and provenance
+    runs-on: ubuntu-24.04
+    needs: build-and-push
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify signature
+        env:
+          IMAGE_DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build-and-push.outputs.digest }}
+          IDENTITY_REGEXP: ^https://github\.com/${{ github.repository }}/\.github/workflows/.+@refs/tags/v.+
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-oidc-issuer='https://token.actions.githubusercontent.com' \
+            --certificate-identity-regexp="$IDENTITY_REGEXP" \
+            "$IMAGE_DIGEST_REF"
+
+      # SLSA provenance attestation smoke test. build-push-action's
+      # `provenance: mode=max` writes a SLSA in-toto attestation
+      # alongside the image; without an explicit verify step the
+      # provenance is produced but never checked, so a tampered
+      # attestation would not surface. This asserts the attestation
+      # exists, is signed by the same keyless identity as the image,
+      # and chains back to the GitHub Actions OIDC issuer.
+      - name: Verify SLSA provenance attestation
+        env:
+          IMAGE_DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build-and-push.outputs.digest }}
+          IDENTITY_REGEXP: ^https://github\.com/${{ github.repository }}/\.github/workflows/.+@refs/tags/v.+
+        run: |
+          set -euo pipefail
+          cosign verify-attestation \
+            --type slsaprovenance \
+            --certificate-oidc-issuer='https://token.actions.githubusercontent.com' \
+            --certificate-identity-regexp="$IDENTITY_REGEXP" \
+            "$IMAGE_DIGEST_REF" > /dev/null

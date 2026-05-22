@@ -1,29 +1,46 @@
+# Two-container deployment for this fork's lean image at
+# ghcr.io/rxxozqfoe/rustdesk-server. The image contains only the
+# `hbbs` (rendezvous, port 21116) and `hbbr` (relay, port 21117)
+# binaries — no s6 init, no bundled API server. Run the optional
+# rustdesk-api project as a separate service if you need an API.
+#
+# Both containers share ./data:/root so they use the same ed25519
+# key (auto-generated on first start of either container).
+
 networks:
   rustdesk-net:
     external: false
+
 services:
-  rustdesk:
+  hbbs:
+    container_name: rustdesk-hbbs
+    image: ghcr.io/rxxozqfoe/rustdesk-server:latest
+    # Replace <relay-server-ip[:21117]> with the host/IP reachable by
+    # clients. Set MUST_LOGIN / KEY / RUSTDESK_API_JWT_KEY / etc. via
+    # `environment:` if you use them.
+    command: hbbs -r <relay-server-ip[:21117]>
     ports:
-      - 21114:21114
-      - 21115:21115
-      - 21116:21116
-      - 21116:21116/udp
-      - 21117:21117
-      - 21118:21118
-      - 21119:21119
-    image: lejianwen/rustdesk-server-s6:latest
-    environment:
-      - RELAY=<relay_server[:port]>
-      - ENCRYPTED_ONLY=1
-      - MUST_LOGIN=N
-      - TZ=Asia/Shanghai
-      - RUSTDESK_API_RUSTDESK_ID_SERVER=<id_server[:21116]>
-      - RUSTDESK_API_RUSTDESK_RELAY_SERVER=<relay_server[:21117]>
-      - RUSTDESK_API_RUSTDESK_API_SERVER=http://<api_server[:21114]>
+      - "21115:21115"
+      - "21116:21116"
+      - "21116:21116/udp"
+      - "21118:21118"
     volumes:
-      - /data/rustdesk/server:/data
-      - /data/rustdesk/api:/app/data #将数据库挂载
-      - /data/rustdesk/server:/app/conf/data #挂载key文件到api容器，可以不用使用 RUSTDESK_API_RUSTDESK_KEY
+      - ./data:/root
+    networks:
+      - rustdesk-net
+    depends_on:
+      - hbbr
+    restart: unless-stopped
+
+  hbbr:
+    container_name: rustdesk-hbbr
+    image: ghcr.io/rxxozqfoe/rustdesk-server:latest
+    command: hbbr
+    ports:
+      - "21117:21117"
+      - "21119:21119"
+    volumes:
+      - ./data:/root
     networks:
       - rustdesk-net
     restart: unless-stopped

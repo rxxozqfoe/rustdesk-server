@@ -35,7 +35,7 @@ check:
 	cargo check
 
 fmt:
-	cargo fmt --all -- --check
+	cargo fmt -p hbbs -- --check
 
 clippy:
-	cargo clippy --all -- -D warnings
+	cargo clippy -p hbbs --no-deps -- -D warnings

@@ -1,0 +1,20 @@
+{
+  "$comment": "Policy for verifying base image signatures with cosign.",
+
+  "$schema_description": {
+    "policies": "Images with sigstore signatures. Matched by image-name prefix (startswith). Each entry specifies the cosign OIDC issuer and certificate-identity regex to require.",
+    "unsigned": "Images we knowingly cannot verify with sigstore today. Listed explicitly (rather than silent-skip) so that any new base image defaults to failing the check until someone makes a conscious decision."
+  },
+
+  "policies": [
+    {
+      "name": "Chainguard public images",
+      "match": "cgr.dev/chainguard/",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "identity": "^https://github\\.com/chainguard-images/images/\\.github/workflows/release\\.yaml@refs/heads/main$",
+      "reason": "Chainguard signs every published digest with sigstore keyless via the chainguard-images/images release.yaml workflow."
+    }
+  ],
+
+  "unsigned": []
+}
