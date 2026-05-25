@@ -109,7 +109,12 @@ static MUST_LOGIN: AtomicBool = AtomicBool::new(false);
 use once_cell::sync::Lazy;
 use tokio::sync::Mutex as TokioMutex; // differentiate if needed
 #[derive(Clone)]
-struct PunchReqEntry { tm: Instant, from_ip: String, to_ip: String, to_id: String }
+struct PunchReqEntry {
+    tm: Instant,
+    from_ip: String,
+    to_ip: String,
+    to_id: String,
+}
 static PUNCH_REQS: Lazy<TokioMutex<Vec<PunchReqEntry>>> = Lazy::new(|| TokioMutex::new(Vec::new()));
 const PUNCH_REQ_DEDUPE_SEC: u64 = 60;
 
@@ -899,7 +904,11 @@ impl RendezvousServer {
     ) -> ResultType<(RendezvousMessage, Option<SocketAddr>)> {
         let mut ph = ph;
         if !key.is_empty() && ph.licence_key != key {
-            log::warn!("Authentication failed from {} for peer {} - invalid key", addr, ph.id);
+            log::warn!(
+                "Authentication failed from {} for peer {} - invalid key",
+                addr,
+                ph.id
+            );
             let mut msg_out = RendezvousMessage::new();
             msg_out.set_punch_hole_response(PunchHoleResponse {
                 failure: punch_hole_response::Failure::LICENSE_MISMATCH.into(),
@@ -949,7 +958,7 @@ impl RendezvousServer {
                 });
                 return Ok((msg_out, None));
             }
-            
+
             // record punch hole request (from addr -> peer id/peer_addr)
             {
                 let from_ip = try_into_v4(addr).ip().to_string();
@@ -957,13 +966,23 @@ impl RendezvousServer {
                 let to_id_clone = id.clone();
                 let mut lock = PUNCH_REQS.lock().await;
                 let mut dup = false;
-                for e in lock.iter().rev().take(30) { // only check recent tail subset for speed
+                for e in lock.iter().rev().take(30) {
+                    // only check recent tail subset for speed
                     if e.from_ip == from_ip && e.to_id == to_id_clone {
-                        if e.tm.elapsed().as_secs() < PUNCH_REQ_DEDUPE_SEC { dup = true; }
+                        if e.tm.elapsed().as_secs() < PUNCH_REQ_DEDUPE_SEC {
+                            dup = true;
+                        }
                         break;
                     }
                 }
-                if !dup { lock.push(PunchReqEntry { tm: Instant::now(), from_ip, to_ip, to_id: to_id_clone }); }
+                if !dup {
+                    lock.push(PunchReqEntry {
+                        tm: Instant::now(),
+                        from_ip,
+                        to_ip,
+                        to_id: to_id_clone,
+                    });
+                }
             }
 
             let mut msg_out = RendezvousMessage::new();
@@ -1272,17 +1291,27 @@ impl RendezvousServer {
                 use std::fmt::Write as _;
                 let mut lock = PUNCH_REQS.lock().await;
                 let arg = fds.next();
-                if let Some("-") = arg { lock.clear(); }
-                else {
+                if let Some("-") = arg {
+                    lock.clear();
+                } else {
                     let mut start = arg.and_then(|x| x.parse::<usize>().ok()).unwrap_or(0);
-                    let mut page_size = fds.next().and_then(|x| x.parse::<usize>().ok()).unwrap_or(10);
-                    if page_size == 0 { page_size = 10; }
+                    let mut page_size = fds
+                        .next()
+                        .and_then(|x| x.parse::<usize>().ok())
+                        .unwrap_or(10);
+                    if page_size == 0 {
+                        page_size = 10;
+                    }
                     for (_, e) in lock.iter().enumerate().skip(start).take(page_size) {
                         let age = e.tm.elapsed();
                         let event_system = std::time::SystemTime::now() - age;
                         let event_iso = chrono::DateTime::<chrono::Utc>::from(event_system)
                             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                        let _ = writeln!(res, "{} {} -> {}@{}", event_iso, e.from_ip, e.to_id, e.to_ip);
+                        let _ = writeln!(
+                            res,
+                            "{} {} -> {}@{}",
+                            event_iso, e.from_ip, e.to_id, e.to_ip
+                        );
                     }
                 }
             }
