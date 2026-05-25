@@ -1,6 +1,6 @@
 # rustdesk-server (rxxozqfoe fork)
 
-[![build](https://github.com/rxxozqfoe/rustdesk-server/actions/workflows/build.yaml/badge.svg)](https://github.com/rxxozqfoe/rustdesk-server/actions/workflows/build.yaml)
+[![publish](https://github.com/rxxozqfoe/rustdesk-server/actions/workflows/publish.yml/badge.svg)](https://github.com/rxxozqfoe/rustdesk-server/actions/workflows/publish.yml)
 
 A fork of [lejianwen/rustdesk-server](https://github.com/lejianwen/rustdesk-server) (in turn forked from [rustdesk/rustdesk-server](https://github.com/rustdesk/rustdesk-server)). Default integration branch is `forapi`.
 

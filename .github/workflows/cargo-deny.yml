@@ -1,0 +1,86 @@
+name: cargo-deny
+
+# Supply-chain check (advisories + sources) via cargo-deny. Replaces the
+# previous cargo-audit workflow:
+#   - [advisories] = exact RustSec advisory scan cargo-audit performed
+#   - [sources]    = additional gate that bans crate origins outside the
+#                    rustdesk / rustdesk-org / open-trade / crates.io
+#                    allow list (a check cargo-audit cannot do)
+#
+# cargo-deny is a strict superset of cargo-audit, so this is a direct
+# replacement with extra surface coverage. Bans + licenses are
+# configured in deny.toml but not yet enforced at the gate; expand the
+# `command` below to `check advisories sources bans licenses` once the
+# repo has had a clean baseline run for those two.
+#
+# HARD, BLOCKING gate: cargo-deny exits non-zero on any advisory or
+# disallowed source and that fails the workflow by design. Do NOT add
+# continue-on-error.
+#
+# Currently red: ~16 advisories reach us transitively through
+# libs/hbb_common (upstream-vendored submodule) and pinned legacy
+# direct deps (axum 0.5, tokio-tungstenite 0.17, sodiumoxide, headers
+# 0.3). That red status is intentional — it keeps the unresolved
+# supply-chain risk loud and forces dependency-modernisation instead
+# of letting it be ignored.
+#
+# Unlike lint/check/scan (in _validate.yml, run every PR/release), the
+# advisory result only changes when either:
+#   1. the dependency set changes  -> Cargo.toml / Cargo.lock edits
+#   2. a new advisory is published against an unchanged dependency
+#      -> covered by the daily schedule
+# so this runs on those triggers only, not on every push.
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/cargo-deny.yml"
+  push:
+    branches: [forapi]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/cargo-deny.yml"
+  schedule:
+    # Daily at 03:00 UTC — catches advisories newly published against
+    # dependencies that have not otherwise changed.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cargo-deny-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-deny:
+    name: cargo-deny (advisories + sources)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      # submodules: recursive is required because Cargo.toml declares
+      # `libs/hbb_common` as a workspace member; without the submodule
+      # checked out, `cargo metadata` (which cargo-deny calls before any
+      # check runs) fails to read its Cargo.toml and the job aborts
+      # before advisories / sources are scanned.
+      - name: Checkout (with submodules)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+
+      # Pinned to the latest v2 release SHA. Renovate (via the
+      # helpers:pinGitHubActionDigestsToSemver preset) will keep the
+      # inline comment in sync with future semver bumps.
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@0105f7c440bc8084c17cad47fe92e63049519458 # v2.0.18
+        with:
+          command: check advisories sources
+          arguments: --all-features

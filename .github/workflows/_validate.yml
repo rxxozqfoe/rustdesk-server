@@ -1,0 +1,241 @@
+name: Validate (reusable)
+
+# Reusable validation pipeline called by ci.yml (on PR / forapi push) and
+# by publish.yml (on v*.*.*-mycustom.* tag push). Keeps the validation
+# rules in a single place so the gate is identical whichever entry
+# point triggers it.
+#
+# Adapted from the Go security-proj-templ to this Rust fork:
+#   - go vet/test          -> cargo fmt/clippy/check (scoped to -p hbbs)
+#   - govulncheck-action   -> cargo-deny (RustSec advisories + sources)
+# rustdesk-server specifics handled here:
+#   - libs/hbb_common is a git submodule -> checkout submodules: recursive
+#   - sqlx runs in ONLINE mode -> `make init-db` must create the SQLite DB
+#     before any cargo compile (the sqlx::query! macros validate against it)
+
+on:
+  workflow_call:
+
+jobs:
+  # -------------------------------------------------------------------
+  # P2: Dockerfile lint (hadolint + digest-pin policy).
+  # -------------------------------------------------------------------
+  lint:
+    name: Lint (hadolint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Run hadolint
+        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+          failure-threshold: warning
+
+      # hadolint has no built-in rule for digest pinning (see
+      # hadolint/hadolint#773, open since 2022). DL3006/DL3007 only
+      # enforce "has a tag" and "not :latest". This step fills that gap.
+      - name: Enforce FROM @sha256 digest pin
+        run: |
+          set -euo pipefail
+          unpinned=$(awk '/^FROM/ && $0 !~ /@sha256:[a-f0-9]{64}/ {print NR ": " $0}' Dockerfile || true)
+          if [ -n "$unpinned" ]; then
+            echo "::error::Unpinned FROM instruction(s) detected:"
+            echo "$unpinned"
+            exit 1
+          fi
+          echo "All FROM instructions are pinned to a digest."
+
+  # -------------------------------------------------------------------
+  # Rust quality gate: fmt + clippy + check.
+  #
+  # Scoped to `-p hbbs` (NOT --all / not the workspace). libs/hbb_common
+  # is an upstream-vendored submodule (rustdesk/hbb_common) that carries
+  # its own rustfmt drift and clippy findings the fork does not own;
+  # diverging it from upstream just to satisfy this fork's CI is not
+  # acceptable. hbb_common still *builds* as a dependency here — it is
+  # only excluded from formatting / linting.
+  #
+  # `cargo test` is intentionally omitted (see commented step below):
+  # the project runs sqlx in online mode and the workspace's own
+  # guidance disables the test runner. `cargo check -p hbbs` still
+  # type-checks every sqlx::query! macro against the live init-db'd
+  # database, so build correctness is exercised. Uncomment the test
+  # step to add unit-test coverage if desired.
+  check:
+    name: Rust check (fmt / clippy / check, -p hbbs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      DATABASE_URL: sqlite:./db_v2.sqlite3
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+
+      - name: Install protobuf compiler
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler pkg-config sqlite3
+
+      # rustflags: "" disables this action's default
+      # RUSTFLAGS="-D warnings" injection. That default would compile the
+      # dependency libs/hbb_common (upstream-vendored submodule) with
+      # warnings-as-errors and fail `cargo check` on the submodule's own
+      # benign warnings — which the fork must not "fix" by diverging the
+      # submodule. We still enforce -D warnings, but ONLY for the hbbs
+      # crate via the explicit `cargo clippy -p hbbs -- -D warnings`.
+      - name: Set up Rust toolchain (clippy + rustfmt)
+        uses: actions-rust-lang/setup-rust-toolchain@1fbea72663f6d4c03efaab13560c8a24cfd2a7cc # v1.9.0
+        with:
+          components: clippy, rustfmt
+          rustflags: ""
+
+      # Matches the Dockerfile/Makefile exactly so CI compiles the same
+      # way the release image does. sqlx-cli is required by `make init-db`.
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --version '~0.8' --no-default-features --features sqlite,rustls --locked
+
+      - name: Initialise database (sqlx online mode)
+        run: make init-db
+
+      # `cargo check` runs FIRST on purpose. build.rs calls
+      # hbb_common::gen_version() which writes the gitignored, build-time
+      # `src/version.rs`; `src/lib.rs` and `src/hbbr.rs` declare
+      # `mod version;`, so without this file `cargo fmt` aborts trying
+      # to read a non-existent module. Running check first generates a
+      # rustfmt-clean version.rs (plain consts) and also validates every
+      # sqlx::query! macro against the init-db'd database.
+      - name: cargo check (-p hbbs)
+        run: cargo check -p hbbs
+
+      - name: cargo fmt (-p hbbs)
+        run: cargo fmt -p hbbs -- --check
+
+      # --no-deps: lint ONLY the hbbs package, not its path dependency
+      # libs/hbb_common. hb_common is an upstream-vendored submodule with
+      # 60+ of its own clippy findings the fork does not own; without
+      # --no-deps clippy lints it as a workspace/path crate and `-D
+      # warnings` turns those into hard errors. hb_common still compiles
+      # (cargo check above); it is just excluded from clippy gating.
+      - name: cargo clippy (-p hbbs, --no-deps)
+        run: cargo clippy -p hbbs --no-deps -- -D warnings
+
+      # - name: cargo test (-p hbbs)
+      #   run: cargo test -p hbbs
+
+  # cargo-deny (RustSec advisories + sources) is intentionally NOT
+  # here. It is a hard blocking gate but only relevant when the
+  # dependency set changes, so it lives in its own workflow
+  # (.github/workflows/cargo-deny.yml): triggered on Cargo.toml /
+  # Cargo.lock / deny.toml changes plus a daily schedule, instead of
+  # running on every PR/release through this reusable validation
+  # pipeline.
+
+  # -------------------------------------------------------------------
+  # P3: Verify cosign/sigstore signatures of pinned base images against
+  # .github/cosign-image-policy.json. Dockerfile-agnostic.
+  # -------------------------------------------------------------------
+  verify-base-images:
+    name: Verify base image signatures
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+
+      - name: Verify all FROM base images against policy
+        run: bash .github/scripts/verify-base-images.sh Dockerfile
+
+  # -------------------------------------------------------------------
+  # P4: Trivy CVE scan. Builds an amd64 image into the local daemon
+  # (no registry push), scans, and uploads SARIF to GitHub code scanning.
+  # The Docker build context needs the hbb_common submodule, so this
+  # checkout also pulls submodules.
+  # -------------------------------------------------------------------
+  scan:
+    name: Trivy CVE scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Build local image for scanning
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: local/scan-target:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Two Trivy passes by design:
+      #
+      #  1. "block" pass — severity=CRITICAL,HIGH, exit-code=1, table
+      #     format. Fails the job if any blocking-severity finding shows
+      #     up. No SARIF here so the failure exits cleanly without
+      #     having to disentangle exit-code vs severity semantics
+      #     (aquasecurity/trivy-action#309).
+      #
+      #  2. "report" pass — every severity, exit-code=0, SARIF format.
+      #     Runs unconditionally (if: always()) so even when the block
+      #     pass fails, the Security tab still gets the full picture
+      #     (UNKNOWN/LOW/MEDIUM also visible, not just CRITICAL/HIGH).
+      #
+      # cargo-deny provides the tighter, Rust-aware crate CVE filter;
+      # Trivy covers OS packages and non-Rust libraries in the final
+      # runtime image that cargo-deny cannot see.
+      - name: Trivy scan — block on CRITICAL/HIGH
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: local/scan-target:${{ github.sha }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      - name: Trivy scan — full SARIF report (all severities)
+        if: always()
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: local/scan-target:${{ github.sha }}
+          format: sarif
+          output: trivy-results.sarif
+          # No severity filter and exit-code=0: this pass exists purely
+          # to populate the GitHub Security tab. The block pass above is
+          # the one that gates the job.
+          exit-code: "0"
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      - name: Upload Trivy SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy

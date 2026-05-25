@@ -1,0 +1,54 @@
+# Hadolint rules: https://github.com/hadolint/hadolint/wiki
+#
+# Policy:
+#  - Every FROM must be pinned to a digest (not just a tag).
+#  - No :latest.
+#  - This is a multi-stage Chainguard build (cgr.dev/chainguard/rust
+#    builder -> cgr.dev/chainguard/wolfi-base runtime). Both stages
+#    use apk (not apt-get) and Chainguard signs every digest.
+#
+# NOTE: hadolint has no built-in rule requiring `@sha256:` digest
+# pinning. DL3006/DL3007 only enforce "has a tag" and "not :latest".
+# The digest requirement is enforced by a separate awk step in
+# .github/workflows/_validate.yml ("Enforce FROM @sha256 digest pin").
+# When hadolint adds native support (upstream issue hadolint/hadolint#773)
+# that step can be removed in favour of the native rule.
+
+failure-threshold: warning
+
+# Treat these as errors rather than info/warnings.
+override:
+  error:
+    - DL3007  # Using latest
+    - DL3022  # COPY --from should reference previously defined FROM alias
+    - DL3023  # COPY --from cannot reference its own FROM
+    - DL3024  # FROM aliases must be unique
+    - DL3026  # Use only official/trusted FROM images
+
+# Ignore rules that don't fit this build.
+ignored:
+  # DL3018: pin apk package versions. Intentionally not enforced:
+  #  - the base images are already digest-pinned (reproducible base),
+  #  - Wolfi apk point-versions churn on every security update, so a
+  #    pinned version makes `apk add` fail the moment Wolfi publishes
+  #    a patched package — the opposite of what we want for timely
+  #    OS-level CVE fixes (Trivy + Renovate digest bumps handle
+  #    base-image freshness instead).
+  - DL3018
+
+  # DL3002: last USER should not be root. The builder stage needs root
+  # for `apk add` and `cargo install --root /usr/local`; the runtime
+  # stage continues to run as root for parity with the previous
+  # debian:bookworm-slim Dockerfile and because hbbs writes the SQLite
+  # DB to CWD (/root) and binds port 21116 (> 1024, no root cap
+  # required). Switching to a non-root UID is a separate hardening
+  # task — it would need a writable /data volume, chown of the binary
+  # path, and verification that none of the rustdesk-utils maintenance
+  # commands assume root — and is out of scope for this CI refactor.
+  - DL3002
+
+trustedRegistries:
+  - docker.io
+  - gcr.io
+  - ghcr.io
+  - cgr.dev

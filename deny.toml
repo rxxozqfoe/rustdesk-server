@@ -1,0 +1,132 @@
+# cargo-deny configuration.
+#
+# Replaces the previous standalone `cargo audit` workflow. cargo-deny is
+# a superset of cargo-audit: the [advisories] section gives the exact
+# same RustSec / OSV advisory scan, and [bans] / [licenses] / [sources]
+# add supply-chain checks cargo-audit cannot do.
+#
+# The CI workflow (.github/workflows/cargo-deny.yml) currently runs
+# `check advisories sources` only — that pair is the direct cargo-audit
+# replacement plus a "registry / git source must be on the allow list"
+# gate. [bans] and [licenses] are configured here but NOT yet enforced
+# at the CI gate; flip them on by extending the workflow command to
+# `check advisories sources bans licenses` once you have audited the
+# repo's current license / duplicate-version state.
+
+[graph]
+# Scan everything the fork actually compiles. We don't restrict by
+# target — cargo-deny will look at all platforms by default, which
+# matches cargo-audit's behaviour and catches a vulnerable dep that
+# only matters on a non-host target.
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------
+# Advisories. Direct replacement for `cargo audit`.
+#
+# Behaviour parity with the previous cargo-audit hard gate:
+#   - vulnerability findings  -> deny (block CI)
+#   - yanked crates           -> deny (block CI)
+#   - unmaintained / unsound  -> warn  (visible in log, doesn't block;
+#                                       cargo-audit treated these the
+#                                       same way by default)
+#
+# This currently fails: ~16 advisories reach us transitively through
+# libs/hbb_common (upstream-vendored submodule) and pinned legacy
+# direct deps (axum 0.5, tokio-tungstenite 0.17, sodiumoxide, headers
+# 0.3). That red status is intentional — see the matching comment in
+# .github/workflows/cargo-deny.yml.
+# ---------------------------------------------------------------------
+[advisories]
+version = 2
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# yanked = "deny" is the v2 default; written out for clarity.
+yanked = "deny"
+ignore = [
+    # Add advisory IDs here only with a reason and an expiry date, e.g.
+    # { id = "RUSTSEC-2024-XXXX", reason = "no upstream fix yet; tracking in #N", expires = "2026-12-31" }
+]
+
+# ---------------------------------------------------------------------
+# Bans. Not yet enforced at the CI gate (see comment at the top).
+# Configured here so flipping the workflow command on is a one-line
+# change. multiple-versions=warn covers the most common surprise
+# (duplicate crate versions inflating compile time and binary size).
+# ---------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------
+# Licenses. Not yet enforced at the CI gate.
+#
+# When you turn this on, expect to iterate on `allow` and `exceptions`
+# for a couple of cargo-deny runs before it passes — Rust's crate
+# ecosystem ships a long tail of SPDX expressions. The allow list
+# below covers the licenses you actually see across hbb_common +
+# rustdesk-server's transitive graph today.
+# ---------------------------------------------------------------------
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "OpenSSL",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "0BSD",
+]
+exceptions = []
+
+[licenses.private]
+ignore = true
+
+# ---------------------------------------------------------------------
+# Sources. Enforced by the CI gate (along with advisories).
+#
+# Lock crate origins down to:
+#   - crates.io
+#   - the two GitHub orgs the project actually pulls cargo git deps
+#     from: open-trade (async-speed-limit) and rustdesk-org (reqwest,
+#     confy, tokio-socks, sysinfo, default_net, machine-uid).
+#
+# Note: libs/hbb_common is a git SUBMODULE, not a cargo git dep, so
+# the rustdesk/hbb_common URL is invisible to cargo-deny and the
+# rustdesk org does NOT belong on this list. cargo-deny emits an
+# `unmatched-organization` warning for any allow-org entry it never
+# sees in the crate graph.
+#
+# If a future Cargo.toml adds a git dep from an unlisted origin, the
+# build fails here instead of silently pulling unverified code.
+# ---------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[sources.allow-org]
+github = ["open-trade", "rustdesk-org"]
+gitlab = []
+bitbucket = []

@@ -1,10 +1,15 @@
 version: 2
 updates:
+  # libs/hbb_common is an upstream submodule we do not control. Daily bumps
+  # produced too much PR noise when upstream was active; weekly batches
+  # the churn into one PR while still keeping us within a few days of
+  # upstream HEAD. Vulnerability-driven submodule bumps still come through
+  # GitHub's Dependabot security alerts on their own channel.
   - package-ecosystem: "gitsubmodule"
     directory: "/"
-    target-branch: "master"
+    target-branch: "forapi"
     schedule:
-      interval: "daily"
+      interval: "weekly"
     commit-message:
       prefix: "Git submodule"
     labels:
