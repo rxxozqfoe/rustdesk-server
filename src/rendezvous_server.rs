@@ -396,26 +396,24 @@ impl RendezvousServer {
     ) -> ResultType<()> {
         if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(bytes) {
             match msg_in.union {
-                Some(rendezvous_message::Union::RegisterPeer(rp)) => {
+                Some(rendezvous_message::Union::RegisterPeer(rp)) if !rp.id.is_empty() => {
                     // B registered
-                    if !rp.id.is_empty() {
-                        log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
-                        let request_pk = self.update_addr(rp.id, addr).await;
+                    log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
+                    let request_pk = self.update_addr(rp.id, addr).await;
+                    let mut msg_out = RendezvousMessage::new();
+                    msg_out.set_register_peer_response(RegisterPeerResponse {
+                        request_pk,
+                        ..Default::default()
+                    });
+                    socket.send(&msg_out, addr).await?;
+                    if self.inner.serial > rp.serial {
                         let mut msg_out = RendezvousMessage::new();
-                        msg_out.set_register_peer_response(RegisterPeerResponse {
-                            request_pk,
+                        msg_out.set_configure_update(ConfigUpdate {
+                            serial: self.inner.serial,
+                            rendezvous_servers: (*self.rendezvous_servers).clone(),
                             ..Default::default()
                         });
                         socket.send(&msg_out, addr).await?;
-                        if self.inner.serial > rp.serial {
-                            let mut msg_out = RendezvousMessage::new();
-                            msg_out.set_configure_update(ConfigUpdate {
-                                serial: self.inner.serial,
-                                rendezvous_servers: (*self.rendezvous_servers).clone(),
-                                ..Default::default()
-                            });
-                            socket.send(&msg_out, addr).await?;
-                        }
                     }
                 }
                 Some(rendezvous_message::Union::RegisterPk(rk)) => {
@@ -457,36 +455,36 @@ impl RendezvousServer {
                 Some(rendezvous_message::Union::LocalAddr(la)) => {
                     self.handle_local_addr(la, addr, Some(socket)).await?;
                 }
-                Some(rendezvous_message::Union::ConfigureUpdate(mut cu)) => {
-                    if try_into_v4(addr).ip().is_loopback() && cu.serial > self.inner.serial {
-                        let mut inner: Inner = (*self.inner).clone();
-                        inner.serial = cu.serial;
-                        self.inner = Arc::new(inner);
-                        self.rendezvous_servers = Arc::new(
-                            cu.rendezvous_servers
-                                .drain(..)
-                                .filter(|x| {
-                                    !x.is_empty()
-                                        && test_if_valid_server(x, "rendezvous-server").is_ok()
-                                })
-                                .collect(),
-                        );
-                        log::info!(
-                            "configure updated: serial={} rendezvous-servers={:?}",
-                            self.inner.serial,
-                            self.rendezvous_servers
-                        );
-                    }
+                Some(rendezvous_message::Union::ConfigureUpdate(mut cu))
+                    if try_into_v4(addr).ip().is_loopback() && cu.serial > self.inner.serial =>
+                {
+                    let mut inner: Inner = (*self.inner).clone();
+                    inner.serial = cu.serial;
+                    self.inner = Arc::new(inner);
+                    self.rendezvous_servers = Arc::new(
+                        cu.rendezvous_servers
+                            .drain(..)
+                            .filter(|x| {
+                                !x.is_empty()
+                                    && test_if_valid_server(x, "rendezvous-server").is_ok()
+                            })
+                            .collect(),
+                    );
+                    log::info!(
+                        "configure updated: serial={} rendezvous-servers={:?}",
+                        self.inner.serial,
+                        self.rendezvous_servers
+                    );
                 }
-                Some(rendezvous_message::Union::SoftwareUpdate(su)) => {
-                    if !self.inner.version.is_empty() && su.url != self.inner.version {
-                        let mut msg_out = RendezvousMessage::new();
-                        msg_out.set_software_update(SoftwareUpdate {
-                            url: self.inner.software_url.clone(),
-                            ..Default::default()
-                        });
-                        socket.send(&msg_out, addr).await?;
-                    }
+                Some(rendezvous_message::Union::SoftwareUpdate(su))
+                    if !self.inner.version.is_empty() && su.url != self.inner.version =>
+                {
+                    let mut msg_out = RendezvousMessage::new();
+                    msg_out.set_software_update(SoftwareUpdate {
+                        url: self.inner.software_url.clone(),
+                        ..Default::default()
+                    });
+                    socket.send(&msg_out, addr).await?;
                 }
                 _ => {}
             }
@@ -506,26 +504,24 @@ impl RendezvousServer {
         if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(bytes) {
             // log::debug!("Received TCP message from {}: {:?}", addr, msg_in);
             match msg_in.union {
-                Some(rendezvous_message::Union::RegisterPeer(rp)) => {
+                Some(rendezvous_message::Union::RegisterPeer(rp)) if !rp.id.is_empty() => {
                     // B registered
-                    if !rp.id.is_empty() {
-                        log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
-                        let request_pk = self.update_addr(rp.id, addr).await;
+                    log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
+                    let request_pk = self.update_addr(rp.id, addr).await;
+                    let mut msg_out = RendezvousMessage::new();
+                    msg_out.set_register_peer_response(RegisterPeerResponse {
+                        request_pk,
+                        ..Default::default()
+                    });
+                    Self::send_to_sink(sink, msg_out).await;
+                    if self.inner.serial > rp.serial {
                         let mut msg_out = RendezvousMessage::new();
-                        msg_out.set_register_peer_response(RegisterPeerResponse {
-                            request_pk,
+                        msg_out.set_configure_update(ConfigUpdate {
+                            serial: self.inner.serial,
+                            rendezvous_servers: (*self.rendezvous_servers).clone(),
                             ..Default::default()
                         });
                         Self::send_to_sink(sink, msg_out).await;
-                        if self.inner.serial > rp.serial {
-                            let mut msg_out = RendezvousMessage::new();
-                            msg_out.set_configure_update(ConfigUpdate {
-                                serial: self.inner.serial,
-                                rendezvous_servers: (*self.rendezvous_servers).clone(),
-                                ..Default::default()
-                            });
-                            Self::send_to_sink(sink, msg_out).await;
-                        }
                     }
                 }
                 Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
@@ -1405,6 +1401,10 @@ impl RendezvousServer {
     }
 
     #[inline]
+    // tungstenite's accept_hdr_async callback takes a closure whose Err type
+    // is tungstenite::http::Response, which is large; we can't change the
+    // signature so silence the lint here only.
+    #[allow(clippy::result_large_err)]
     async fn handle_listener_inner(
         &mut self,
         stream: TcpStream,
@@ -1477,26 +1477,28 @@ impl RendezvousServer {
 
     #[inline]
     async fn get_pk(&mut self, version: &str, id: String) -> Bytes {
-        if version.is_empty() || self.inner.sk.is_none() {
-            Bytes::new()
-        } else {
-            match self.pm.get(&id).await {
-                Some(peer) => {
-                    let pk = peer.read().await.pk.clone();
-                    sign::sign(
-                        &hbb_common::message_proto::IdPk {
-                            id,
-                            pk,
-                            ..Default::default()
-                        }
-                        .write_to_bytes()
-                        .unwrap_or_default(),
-                        self.inner.sk.as_ref().unwrap(),
-                    )
-                    .into()
-                }
-                _ => Bytes::new(),
+        if version.is_empty() {
+            return Bytes::new();
+        }
+        let Some(sk) = self.inner.sk.as_ref() else {
+            return Bytes::new();
+        };
+        match self.pm.get(&id).await {
+            Some(peer) => {
+                let pk = peer.read().await.pk.clone();
+                sign::sign(
+                    &hbb_common::message_proto::IdPk {
+                        id,
+                        pk,
+                        ..Default::default()
+                    }
+                    .write_to_bytes()
+                    .unwrap_or_default(),
+                    sk,
+                )
+                .into()
             }
+            _ => Bytes::new(),
         }
     }
 

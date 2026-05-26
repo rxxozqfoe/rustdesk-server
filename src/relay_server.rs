@@ -390,6 +390,10 @@ async fn handle_connection(
     });
 }
 
+// tungstenite's accept_hdr_async callback takes a closure whose Err type
+// is tungstenite::http::Response, which is large; we can't change the
+// signature so silence the lint here only.
+#[allow(clippy::result_large_err)]
 async fn make_pair(
     stream: TcpStream,
     mut addr: SocketAddr,
