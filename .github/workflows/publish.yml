@@ -95,7 +95,11 @@ jobs:
     name: Build, push, sign and attest multi-arch image
     runs-on: ubuntu-24.04
     needs: validate
-    timeout-minutes: 90
+    # 90 minutes is not enough for a Chainguard + Rust LTO + QEMU arm64
+    # build (cancelled v1.1.15-mycustom.2 at the 90-min mark). The arm64
+    # path under QEMU is the slow leg. Bumped to 240 to give meaningful
+    # headroom; revisit if we move to native arm64 runners.
+    timeout-minutes: 240
     permissions:
       contents: read
       packages: write
