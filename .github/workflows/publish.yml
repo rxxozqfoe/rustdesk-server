@@ -103,7 +103,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write  # keyless cosign signing via GitHub OIDC
+      id-token: write       # keyless cosign signing via GitHub OIDC
+      attestations: write   # actions/attest-build-provenance writes to the GitHub attestations API
     outputs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
@@ -146,7 +147,15 @@ jobs:
 
       # Trivy CVE scan already ran in validate (same Dockerfile, same
       # commit, same base image digests). Go straight to multi-arch
-      # push with SBOM + SLSA provenance attestations attached.
+      # push.
+      #
+      # `provenance: mode=max` + `sbom: true` attach BuildKit's own
+      # in-toto attestations to the OCI manifest (visible via
+      # `docker buildx imagetools inspect`). NOTE: these are BuildKit
+      # OCI attestations, NOT Sigstore-signed — `cosign verify-attestation`
+      # cannot see them (see actions/attest-build-provenance#162). The
+      # verifiable SLSA provenance is produced by the separate
+      # actions/attest-build-provenance step below.
       #
       # arm64 is built under QEMU emulation; a Rust LTO release build
       # is slow there but the project ships linux/amd64,linux/arm64
@@ -178,6 +187,20 @@ jobs:
           echo "Signing $IMAGE_DIGEST_REF"
           cosign sign "$IMAGE_DIGEST_REF"
 
+      # Sigstore-signed SLSA build provenance. Unlike build-push-action's
+      # `provenance: mode=max` (BuildKit OCI attestation, not Sigstore
+      # signed), this produces a provenance attestation signed via GitHub
+      # OIDC + Fulcio + Rekor and pushes it to GHCR alongside the image,
+      # so it is verifiable with `gh attestation verify` in the
+      # verify-published-image job. subject-digest is the multi-arch
+      # index digest, so the attestation covers the whole manifest list.
+      - name: Attest build provenance (Sigstore-signed SLSA)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
   # -------------------------------------------------------------------
   # Smoke test: re-verify the signature and SLSA provenance attestation
   # we just produced against the expected workflow identity (tag-push
@@ -192,7 +215,6 @@ jobs:
     permissions:
       contents: read
       packages: read
-      id-token: write
     steps:
       - name: Install cosign
         uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
@@ -215,21 +237,21 @@ jobs:
             --certificate-identity-regexp="$IDENTITY_REGEXP" \
             "$IMAGE_DIGEST_REF"
 
-      # SLSA provenance attestation smoke test. build-push-action's
-      # `provenance: mode=max` writes a SLSA in-toto attestation
-      # alongside the image; without an explicit verify step the
-      # provenance is produced but never checked, so a tampered
-      # attestation would not surface. This asserts the attestation
-      # exists, is signed by the same keyless identity as the image,
-      # and chains back to the GitHub Actions OIDC issuer.
-      - name: Verify SLSA provenance attestation
+      # SLSA provenance smoke test. The verifiable provenance is the one
+      # produced by actions/attest-build-provenance (Sigstore-signed,
+      # pushed to GHCR), so it is verified with `gh attestation verify`
+      # — NOT `cosign verify-attestation`, which only sees cosign-signed
+      # attestations and cannot read either the GitHub attestation or
+      # BuildKit's OCI provenance (that mismatch was what failed the
+      # first v1.1.15-mycustom.2 publish). --signer-workflow pins the
+      # attestation to this repo's publish.yml identity, the same
+      # guarantee the cosign --certificate-identity-regexp gave.
+      - name: Verify SLSA build provenance attestation
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build-and-push.outputs.digest }}
-          IDENTITY_REGEXP: ^https://github\.com/${{ github.repository }}/\.github/workflows/.+@refs/tags/v.+
         run: |
           set -euo pipefail
-          cosign verify-attestation \
-            --type slsaprovenance \
-            --certificate-oidc-issuer='https://token.actions.githubusercontent.com' \
-            --certificate-identity-regexp="$IDENTITY_REGEXP" \
-            "$IMAGE_DIGEST_REF" > /dev/null
+          gh attestation verify "oci://${IMAGE_DIGEST_REF}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/publish.yml"
