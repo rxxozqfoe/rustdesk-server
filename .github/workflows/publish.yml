@@ -1,30 +1,39 @@
 name: publish
 
-# Unified docker-image publish pipeline. Replaces the previous
-# release.yml + build.yaml split now that both shared the same
-# build/sign/verify body and only diverged on tag pattern and a few
-# guards. Triggers ONLY on v*.*.*-mycustom.* tags — there is no
-# workflow_dispatch, so every published image is anchored to a signed
-# git tag.
+# Unified docker-image publish pipeline. Triggers ONLY on
+# v*.*.*-mycustom.* tags — there is no workflow_dispatch, so every
+# published image is anchored to a signed git tag.
 #
 # Pipeline:
-#   1. guard               -- reject tags not reachable from forapi
-#   2. validate            -- reuse _validate.yml (lint / clippy / check
-#                             / hadolint+digest-pin / cosign verify-base
-#                             / Trivy block + full SARIF)
-#   3. build-and-push      -- multi-arch (amd64+arm64) build with SBOM
-#                             and SLSA provenance attestations attached,
-#                             pushed to GHCR and keyless cosign-signed
-#   4. verify-published-image
-#                          -- smoke test: re-verify the image signature
-#                             and the SLSA provenance attestation
+#   1. guard    -- reject tags not reachable from forapi
+#   2. validate -- reuse _validate.yml (lint / clippy / check /
+#                  hadolint+digest-pin / cosign verify-base / Trivy
+#                  block + full SARIF)
+#   3. build    -- ONE job per platform on a NATIVE runner (amd64 on
+#                  ubuntu-24.04, arm64 on ubuntu-24.04-arm), built and
+#                  pushed by digest, each carrying BuildKit's OCI
+#                  SBOM + provenance attestations. Runs in parallel, so
+#                  wall-clock is the slowest single platform — not the
+#                  sum, and NOT arm64-under-QEMU (which took ~4h and is
+#                  why this used to need a 240-min timeout).
+#   4. merge    -- assemble the per-platform digests into one manifest
+#                  list with `docker buildx imagetools create` (this
+#                  preserves the per-platform OCI attestations), tag +
+#                  push it, then cosign-sign and emit a Sigstore-signed
+#                  SLSA provenance over the final index digest.
+#   5. verify-published-image
+#               -- smoke test: re-verify the signature and the
+#                  Sigstore provenance against this workflow's identity.
 #
-# Each stage gates the next, so a tag on a non-forapi commit, a failing
-# lint / check / verify-base-images / Trivy, or a broken build all stop
-# the pipeline before anything is published. cargo-deny (RustSec
-# advisories + sources) lives in its own workflow on a Cargo.* /
-# deny.toml path filter plus a daily schedule, independent of this
-# pipeline.
+# Each stage gates the next. cargo-deny (RustSec advisories + sources)
+# lives in its own workflow on a Cargo.* / deny.toml path filter plus a
+# daily schedule, independent of this pipeline.
+#
+# Two complementary attestations ride on the published image:
+#   - OCI BuildKit (sbom: true + provenance: mode=max), readable via
+#     `docker buildx imagetools inspect` — rich build detail + SBOM.
+#   - Sigstore (actions/attest-build-provenance), verifiable via
+#     `gh attestation verify` — cryptographic, identity-bound provenance.
 
 on:
   push:
@@ -35,12 +44,8 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
-# Top-level permissions are intentionally the least-privileged default.
-# Job-level blocks grant only what each job needs (packages: write to
-# push, id-token: write for keyless cosign signing, security-events:
-# write for SARIF upload). Keeping id-token at job-level only means a
-# future job added without an explicit permissions block will NOT
-# inherit OIDC access.
+# Top-level permissions are the least-privileged default; each job
+# elevates only what it needs.
 permissions:
   contents: read
 
@@ -74,11 +79,8 @@ jobs:
           echo "OK: tag $GITHUB_REF_NAME is on forapi."
 
   # -------------------------------------------------------------------
-  # B: reuse the same validation pipeline as ci.yml. Runs lint, check,
-  # verify-base-images and Trivy scan against the tagged commit, so the
-  # gate is identical to what a PR sees -- no drift. (cargo-deny runs
-  # separately, on Cargo.toml/Cargo.lock/deny.toml changes + a daily
-  # schedule.)
+  # B: reuse the same validation pipeline as ci.yml against the tagged
+  # commit, so the gate is identical to what a PR sees -- no drift.
   # -------------------------------------------------------------------
   validate:
     needs: guard
@@ -88,33 +90,43 @@ jobs:
       security-events: write
 
   # -------------------------------------------------------------------
-  # Multi-arch build, push, sign, SBOM + SLSA provenance attest.
-  # The Docker build context needs the hbb_common submodule.
+  # Per-platform build on a native runner, pushed by digest. No QEMU:
+  # amd64 builds on ubuntu-24.04, arm64 on the native ubuntu-24.04-arm
+  # runner (GA + free for public repos since 2025-08). The two run in
+  # parallel. `push-by-digest=true` pushes an untagged, content-addressed
+  # single-platform image (an OCI index carrying the OCI SBOM/provenance
+  # attestations); the merge job stitches the digests into the final
+  # tagged manifest list.
   # -------------------------------------------------------------------
-  build-and-push:
-    name: Build, push, sign and attest multi-arch image
-    runs-on: ubuntu-24.04
+  build:
+    name: Build ${{ matrix.platform }}
     needs: validate
-    # 90 minutes is not enough for a Chainguard + Rust LTO + QEMU arm64
-    # build (cancelled v1.1.15-mycustom.2 at the 90-min mark). The arm64
-    # path under QEMU is the slow leg. Bumped to 240 to give meaningful
-    # headroom; revisit if we move to native arm64 runners.
-    timeout-minutes: 240
+    runs-on: ${{ matrix.runner }}
+    # Native build, far faster than the old QEMU arm64 path. Generous
+    # but well under the previous 240; arm64-native should finish in
+    # tens of minutes.
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
-      id-token: write       # keyless cosign signing via GitHub OIDC
-      attestations: write   # actions/attest-build-provenance writes to the GitHub attestations API
-    outputs:
-      digest: ${{ steps.push.outputs.digest }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
+      - name: Compute platform slug
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: echo "PLATFORM_SLUG=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+
       - name: Checkout (with submodules)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: recursive
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
@@ -126,16 +138,87 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Tag strategy for v*.*.*-mycustom.* tag events:
-      #   - <version>            (strip the leading v; e.g., 1.2.3-mycustom.4)
-      #   - latest               (rolling — always overwrites)
-      #
+      # Labels only — push-by-digest images are untagged; tags are
+      # applied on the merged manifest list in the merge job.
+      - name: Extract metadata (labels)
+        id: meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      # Per-platform cache scopes so the two runners don't clobber each
+      # other's gha cache. sbom + provenance attach BuildKit's OCI
+      # attestations; imagetools create in the merge job carries them
+      # into the final manifest list.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ env.PLATFORM_SLUG }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_SLUG }}
+          sbom: true
+          provenance: mode=max
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: digests-${{ env.PLATFORM_SLUG }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # -------------------------------------------------------------------
+  # Assemble the per-platform digests into one tagged manifest list,
+  # then sign + attest the final index digest.
+  # -------------------------------------------------------------------
+  merge:
+    name: Merge, sign and attest manifest list
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write       # keyless cosign signing via GitHub OIDC
+      attestations: write   # actions/attest-build-provenance
+    outputs:
+      digest: ${{ steps.merged.outputs.digest }}
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       # latest=true (not =auto): v*.*.*-mycustom.* is technically a
-      # semver prerelease, so latest=auto would never promote any of
-      # our tags to :latest. We explicitly want :latest to track the
-      # newest published image, matching the previous build.yaml
-      # behaviour.
-      - name: Extract metadata
+      # semver prerelease, so latest=auto would never promote any of our
+      # tags to :latest. We explicitly want :latest to track the newest
+      # published image.
+      - name: Extract metadata (tags)
         id: meta
         uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
         with:
@@ -145,35 +228,27 @@ jobs:
           flavor: |
             latest=true
 
-      # Trivy CVE scan already ran in validate (same Dockerfile, same
-      # commit, same base image digests). Go straight to multi-arch
-      # push.
-      #
-      # `provenance: mode=max` + `sbom: true` attach BuildKit's own
-      # in-toto attestations to the OCI manifest (visible via
-      # `docker buildx imagetools inspect`). NOTE: these are BuildKit
-      # OCI attestations, NOT Sigstore-signed — `cosign verify-attestation`
-      # cannot see them (see actions/attest-build-provenance#162). The
-      # verifiable SLSA provenance is produced by the separate
-      # actions/attest-build-provenance step below.
-      #
-      # arm64 is built under QEMU emulation; a Rust LTO release build
-      # is slow there but the project ships linux/amd64,linux/arm64
-      # parity for upstream-compatible images.
-      - name: Build and push multi-arch image
-        id: push
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          sbom: true
-          provenance: mode=max
+      # imagetools create (NOT `docker manifest create`) is what carries
+      # the per-platform OCI SBOM/provenance attestations into the merged
+      # manifest list. Tags come from metadata-action; sources are the
+      # per-platform digests dropped as filenames in the digests dir.
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${REGISTRY}/${IMAGE_NAME}@sha256:%s " *)
+
+      - name: Capture merged index digest
+        id: merged
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          digest=$(docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${VERSION}" --format '{{json .Manifest}}' | jq -r '.digest')
+          echo "Merged index digest: $digest"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
@@ -181,36 +256,32 @@ jobs:
       - name: Sign image (keyless)
         env:
           COSIGN_YES: "true"
-          IMAGE_DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+          IMAGE_DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.merged.outputs.digest }}
         run: |
           set -euo pipefail
           echo "Signing $IMAGE_DIGEST_REF"
           cosign sign "$IMAGE_DIGEST_REF"
 
-      # Sigstore-signed SLSA build provenance. Unlike build-push-action's
-      # `provenance: mode=max` (BuildKit OCI attestation, not Sigstore
-      # signed), this produces a provenance attestation signed via GitHub
-      # OIDC + Fulcio + Rekor and pushes it to GHCR alongside the image,
-      # so it is verifiable with `gh attestation verify` in the
-      # verify-published-image job. subject-digest is the multi-arch
-      # index digest, so the attestation covers the whole manifest list.
+      # Sigstore-signed SLSA provenance over the merged index digest, so
+      # the attestation covers the whole manifest list. Verifiable with
+      # `gh attestation verify` (the OCI BuildKit provenance from the
+      # build jobs is separate and not Sigstore-signed).
       - name: Attest build provenance (Sigstore-signed SLSA)
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.push.outputs.digest }}
+          subject-digest: ${{ steps.merged.outputs.digest }}
           push-to-registry: true
 
   # -------------------------------------------------------------------
-  # Smoke test: re-verify the signature and SLSA provenance attestation
-  # we just produced against the expected workflow identity (tag-push
-  # only — no branch dispatch any more). Catches signing
-  # misconfiguration here rather than in a downstream consumer.
+  # Smoke test: re-verify the signature and the Sigstore SLSA provenance
+  # we just produced against the expected workflow identity. Catches
+  # signing / attestation misconfiguration here rather than downstream.
   # -------------------------------------------------------------------
   verify-published-image:
     name: Verify our own signature and provenance
     runs-on: ubuntu-24.04
-    needs: build-and-push
+    needs: merge
     timeout-minutes: 10
     permissions:
       contents: read
@@ -228,7 +299,7 @@ jobs:
 
       - name: Verify signature
         env:
-          IMAGE_DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build-and-push.outputs.digest }}
+          IMAGE_DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.merge.outputs.digest }}
           IDENTITY_REGEXP: ^https://github\.com/${{ github.repository }}/\.github/workflows/.+@refs/tags/v.+
         run: |
           set -euo pipefail
@@ -237,19 +308,14 @@ jobs:
             --certificate-identity-regexp="$IDENTITY_REGEXP" \
             "$IMAGE_DIGEST_REF"
 
-      # SLSA provenance smoke test. The verifiable provenance is the one
-      # produced by actions/attest-build-provenance (Sigstore-signed,
-      # pushed to GHCR), so it is verified with `gh attestation verify`
-      # — NOT `cosign verify-attestation`, which only sees cosign-signed
-      # attestations and cannot read either the GitHub attestation or
-      # BuildKit's OCI provenance (that mismatch was what failed the
-      # first v1.1.15-mycustom.2 publish). --signer-workflow pins the
-      # attestation to this repo's publish.yml identity, the same
-      # guarantee the cosign --certificate-identity-regexp gave.
+      # The verifiable provenance is the Sigstore one from
+      # actions/attest-build-provenance, so verify with `gh attestation
+      # verify` — NOT `cosign verify-attestation`. --signer-workflow pins
+      # it to this repo's publish.yml identity.
       - name: Verify SLSA build provenance attestation
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE_DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build-and-push.outputs.digest }}
+          IMAGE_DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.merge.outputs.digest }}
         run: |
           set -euo pipefail
           gh attestation verify "oci://${IMAGE_DIGEST_REF}" \
