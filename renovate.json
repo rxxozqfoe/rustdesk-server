@@ -101,13 +101,11 @@
     // their upstream publishers; one grouped PR is less noise than two
     // separate PRs that always land together anyway.
     {
-      "description": "Group container base images (Rust builder + Debian runtime).",
+      "description": "Group Chainguard base images (Rust builder + wolfi-base runtime).",
       "matchDatasources": ["docker"],
       "matchPackageNames": [
-        "rust",
-        "docker.io/library/rust",
-        "debian",
-        "docker.io/library/debian"
+        "cgr.dev/chainguard/rust",
+        "cgr.dev/chainguard/wolfi-base"
       ],
       "groupName": "container base images"
     },
@@ -122,25 +120,15 @@
       "matchUpdateTypes": ["major"],
       "dependencyDashboardApproval": true,
       "labels": ["dependencies", "major-update"]
-    },
-
-    // The Rust toolchain ships a new stable every ~6 weeks (1.86 ->
-    // 1.87 -> ...); each "minor" in Renovate's classification can carry
-    // new lints, stdlib changes and behavioural shifts that warrant a
-    // migration audit. Route Rust base-image minor bumps through
-    // Dependency Dashboard approval the same way cross-major Docker
-    // bumps are routed, instead of auto-opening a PR. Digest/patch
-    // refreshes are unaffected and continue to land automatically.
-    //
-    // vulnerabilityAlerts above still overrides this, so a CVE-driven
-    // Rust minor bump opens a PR directly without waiting for approval.
-    {
-      "description": "Rust toolchain minor bumps (1.X -> 1.Y) require Dashboard approval.",
-      "matchDatasources": ["docker"],
-      "matchPackageNames": ["rust", "docker.io/library/rust"],
-      "matchUpdateTypes": ["minor"],
-      "dependencyDashboardApproval": true,
-      "labels": ["dependencies", "rust-minor-update"]
     }
+    // NOTE: there used to be a "Rust toolchain minor bumps require
+    // Dashboard approval" rule here, matching docker.io/library/rust:1.X
+    // semver tags. It no longer applies: the Dockerfile now uses
+    // Chainguard's rolling-tag images (cgr.dev/chainguard/rust:latest-dev
+    // pinned by digest), which have no minor tag for Renovate to match —
+    // Rust version changes arrive as digest updates instead. Those digest
+    // PRs are still gated by `automerge: false` (every base-image bump
+    // needs a human merge) plus the Trivy scan and verify-base-images
+    // (cosign policy) jobs in CI, so base-image changes are not unreviewed.
   ]
 }
