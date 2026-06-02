@@ -7,36 +7,31 @@ name: Renovate
 # This repo's default branch is "forapi"; Renovate targets the default
 # branch automatically, so no baseBranches override is needed.
 #
-# Prerequisites (one-time setup):
-#
-#   1. Create a Personal Access Token (or GitHub App installation token)
-#      with these fine-grained PAT permissions (the names below are the
-#      labels shown in the PAT settings UI):
-#          Contents:        Read and write   (create branches, push commits)
-#          Pull requests:   Read and write   (open / update / close PRs)
-#          Workflows:       Read and write   (update .github/workflows/*.yml
-#                                             files; GITHUB_TOKEN cannot)
-#          Issues:          Read and write   (maintain the Dependency
-#                                             Dashboard issue; without
-#                                             this runs log "Could not
-#                                             ensure issue ... 403")
-#          Commit statuses: Read and write   (set the renovate/stability-days
-#                                             commit status that tracks
-#                                             minimumReleaseAge; without
-#                                             this the run aborts with a
-#                                             misleading "Repository has
-#                                             changed during renovation"
-#                                             error)
-#      A fine-grained PAT is recommended; restrict to just this repo.
-#
-#   2. Save it as a repository secret named RENOVATE_TOKEN.
+# Prerequisites (one-time setup): a GitHub App created and installed on
+# this repo, with its credentials stored as the RENOVATE_APP_ID and
+# RENOVATE_APP_PRIVATE_KEY repository secrets. The App needs these
+# repository permissions:
+#     Contents:        Read and write   (create branches, push commits)
+#     Pull requests:   Read and write   (open / update / close PRs)
+#     Workflows:       Read and write   (update .github/workflows/*.yml;
+#                                        GITHUB_TOKEN cannot)
+#     Issues:          Read and write   (maintain the Dependency Dashboard
+#                                        issue; else "Could not ensure
+#                                        issue ... 403")
+#     Commit statuses: Read and write   (set renovate/stability-days for
+#                                        minimumReleaseAge; else the run
+#                                        aborts with a misleading
+#                                        "Repository has changed during
+#                                        renovation" error)
+#     Metadata:        Read             (forced on by GitHub)
+# Full step-by-step setup: .github/RENOVATE_GITHUB_APP_SETUP.md
 #
 # Notes:
 #
 #   - The workflow's built-in GITHUB_TOKEN is NOT used for Renovate's
 #     git operations, because GITHUB_TOKEN cannot push changes that
 #     modify .github/workflows/*.yml files (GitHub blocks this by design).
-#     Hence the explicit RENOVATE_TOKEN.
+#     Hence the per-run App installation token minted below.
 #
 #   - The schedule here controls WHEN Renovate runs. The "schedule"
 #     field inside renovate.json controls when it is allowed to OPEN
@@ -83,11 +78,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      # Mint a short-lived GitHub App installation token. The action
+      # resolves the installation from app-id + private-key, and
+      # owner/repositories scope the token to this repo only (without
+      # them it would cover every repo the App is installed on). See
+      # .github/RENOVATE_GITHUB_APP_SETUP.md for the one-time App setup.
+      - name: Mint Renovate installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RENOVATE_APP_ID }}
+          private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       - name: Run Renovate
         uses: renovatebot/github-action@3633cede7d4d4598438e654eac4a695e46004420 # v46.1.7
         with:
           configurationFile: renovate.json
-          token: ${{ secrets.RENOVATE_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
         env:
           LOG_LEVEL: ${{ inputs.logLevel || 'info' }}
           RENOVATE_DRY_RUN: ${{ inputs.dryRun && 'full' || '' }}

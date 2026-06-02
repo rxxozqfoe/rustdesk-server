@@ -95,12 +95,14 @@ repository secret**, for each:
 The **Run Renovate** step takes a short-lived installation token minted
 by the official
 [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token)
-action from the three secrets above:
+action from the App ID and private-key secrets above (the action
+resolves the installation itself from `owner`/`repositories`, so
+`RENOVATE_APP_INSTALLATION_ID` is not consumed here):
 
 ```yaml
       - name: Mint Renovate installation token
         id: app-token
-        uses: actions/create-github-app-token@<PIN_TO_SHA>  # v2 latest
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.RENOVATE_APP_ID }}
           private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
