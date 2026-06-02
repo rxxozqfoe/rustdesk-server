@@ -1,22 +1,9 @@
-# Switching Renovate from a Personal Access Token to a GitHub App
+# Setting up Renovate with a GitHub App
 
-`.github/workflows/renovate.yml` currently authenticates Renovate with a
-fine-grained Personal Access Token stored in the `RENOVATE_TOKEN` secret.
-That works, but it has two known sharp edges:
-
-- **Single point of failure.** The PAT is bound to one human GitHub
-  account. If that account loses access (offboard, password rotation,
-  PAT expiry, scopes revoked) the entire dependency-update pipeline
-  stops with no warning.
-- **No expiry hygiene.** Fine-grained PATs expire and have to be
-  manually rotated. A missed rotation = silently broken Renovate runs.
-
-A GitHub App installation token fixes both: it has no human account
-behind it, it auto-renews on each workflow run, and its permissions can
-be locked down per-installation rather than per-user.
-
-This document is the runbook for that migration. Nothing in the runbook
-is automated — GitHub App creation is a one-time UI flow.
+This document describes how to set up a GitHub App so that
+`.github/workflows/renovate.yml` can authenticate Renovate with an App
+installation token. App creation is a one-time GitHub UI flow — nothing
+here is automated.
 
 ---
 
@@ -83,11 +70,11 @@ On the App page (Settings → Developer settings → GitHub Apps → your App):
 
 You now have three things you need:
 
-| Value           | Where it comes from                                                  |
-| --------------- | -------------------------------------------------------------------- |
-| `APP_ID`        | App page, "About" section, numeric **App ID** field.                 |
-| `INSTALLATION_ID` | The numeric ID from the install URL in step 3.5.                   |
-| `APP_PRIVATE_KEY` | The contents of the `.pem` file from step 2.                       |
+| Value             | Where it comes from                                  |
+| ----------------- | ---------------------------------------------------- |
+| `APP_ID`          | App page, "About" section, numeric **App ID** field. |
+| `INSTALLATION_ID` | The numeric ID from the install URL in step 3.5.     |
+| `APP_PRIVATE_KEY` | The contents of the `.pem` file from step 2.         |
 
 ---
 
@@ -101,18 +88,14 @@ repository secret**, for each:
 - `RENOVATE_APP_PRIVATE_KEY` ← full `.pem` contents including the
   `-----BEGIN ...-----` / `-----END ...-----` lines
 
-Do NOT delete the existing `RENOVATE_TOKEN` yet — keep it as a fallback
-until the App-based run is green.
-
 ---
 
-## 6. Switch `.github/workflows/renovate.yml` to use the App
+## 6. Point `.github/workflows/renovate.yml` at the App
 
-Replace the **Run Renovate** step in `.github/workflows/renovate.yml`
-with the snippet below. The official
+The **Run Renovate** step takes a short-lived installation token minted
+by the official
 [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token)
-action mints a short-lived installation token from the three secrets
-above, and Renovate is given that token instead of the PAT.
+action from the three secrets above:
 
 ```yaml
       - name: Mint Renovate installation token
@@ -137,13 +120,12 @@ above, and Renovate is given that token instead of the PAT.
           RENOVATE_REPOSITORIES: ${{ github.repository }}
 ```
 
-Pin `actions/create-github-app-token` to a commit SHA the same way
-the rest of the workflow does (Renovate will manage future bumps via
+Pin `actions/create-github-app-token` to a commit SHA the same way the
+rest of the workflow does (Renovate will manage future bumps via
 `helpers:pinGitHubActionDigestsToSemver`).
 
-The token Renovate receives is automatically scoped to the
-repositories you listed, expires after 1 hour, and is revoked at job
-end. No PAT, no rotation reminder, no per-user surface.
+The token Renovate receives is automatically scoped to the repositories
+you listed, expires after one hour, and is revoked at job end.
 
 ---
 
@@ -153,25 +135,14 @@ end. No PAT, no rotation reminder, no per-user surface.
    *Actions → Renovate → Run workflow* (with `dryRun: true` the first
    time).
 2. Watch the run. The "Mint Renovate installation token" step should
-   succeed; the "Run Renovate" step should pick up the same set of
-   updates the PAT-based run would.
-3. Once a non-dry-run is green and produces a PR, you can delete the
-   `RENOVATE_TOKEN` secret.
-
----
-
-## Rollback
-
-If anything goes wrong, revert the workflow change (drop the
-`Mint Renovate installation token` step, restore
-`token: ${{ secrets.RENOVATE_TOKEN }}`). The PAT path keeps working as
-long as you have not deleted the secret.
+   succeed; the "Run Renovate" step should pick up the expected set of
+   updates.
+3. Re-run with `dryRun: false` and confirm it opens a PR.
 
 ---
 
 ## Optional: install on more repos later
 
 If you later want this App to manage another repo, install it from the
-App page (step 3) onto that repo, and update the `repositories:` list
-on the token step (or drop it to let the token cover every installed
-repo).
+App page (step 3) onto that repo, and update the `repositories:` list on
+the token step (or drop it to let the token cover every installed repo).
