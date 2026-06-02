@@ -91,6 +91,17 @@ jobs:
           private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          # Pin the minted token to exactly what Renovate needs, as a
+          # code-level allow-list. Listing any permission-* makes the
+          # token contain ONLY these scopes (+ forced metadata:read), so
+          # it can't silently inherit extra access if the App
+          # installation is later widened in the UI. Mirrors the App
+          # permission table in RENOVATE_GITHUB_APP_SETUP.md.
+          permission-contents: write       # create branches, push commits
+          permission-pull-requests: write  # open / update / close PRs
+          permission-issues: write         # Dependency Dashboard issue
+          permission-statuses: write       # renovate/stability-days status
+          permission-workflows: write      # update .github/workflows/*
 
       - name: Run Renovate
         uses: renovatebot/github-action@3633cede7d4d4598438e654eac4a695e46004420 # v46.1.7

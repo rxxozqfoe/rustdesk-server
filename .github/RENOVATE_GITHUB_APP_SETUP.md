@@ -110,6 +110,14 @@ resolves the installation itself from `owner`/`repositories`, so
           # would be scoped to every repo the App is installed in.
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          # Pin the token's scopes in code. Listing any permission-*
+          # makes the token contain ONLY these (+ forced metadata:read),
+          # so it can't inherit extra access if the App is later widened.
+          permission-contents: write       # create branches, push commits
+          permission-pull-requests: write  # open / update / close PRs
+          permission-issues: write         # Dependency Dashboard issue
+          permission-statuses: write       # renovate/stability-days status
+          permission-workflows: write      # update .github/workflows/*
 
       - name: Run Renovate
         uses: renovatebot/github-action@3633cede7d4d4598438e654eac4a695e46004420 # v46.1.7
