@@ -20,6 +20,14 @@ on:
 permissions:
   contents: read
 
+# Collapse redundant runs on the same ref. On a PR, a new push cancels
+# the previous still-running validation (cancel-in-progress). On a push
+# to forapi we do NOT cancel — every commit that lands on the
+# integration branch keeps its own complete CI record.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   validate:
     uses: ./.github/workflows/_validate.yml
