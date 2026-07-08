@@ -540,6 +540,15 @@ impl RendezvousServer {
                     if let Some(peer) = self.pm.get_in_memory(&rf.id).await {
                         let mut msg_out = RendezvousMessage::new();
                         rf.socket_addr = AddrMangle::encode(addr).into();
+                        // 1.4.9: attribute the audit to the controlling user by
+                        // injecting a conn_audit_ref the controlled peer echoes back.
+                        if let Some(reff) = crate::api_integration::mint_conn_audit_ref(&rf.token) {
+                            rf.controlled_context =
+                                MessageField::from_option(Some(ControlledContext {
+                                    conn_audit_ref: reff,
+                                    ..Default::default()
+                                }));
+                        }
                         msg_out.set_request_relay(rf);
                         let peer_addr = peer.read().await.socket_addr;
                         self.tx.send(Data::Msg(msg_out.into(), peer_addr)).ok();
@@ -659,6 +668,16 @@ impl RendezvousServer {
                     });
                     Self::send_to_sink(sink, msg_out).await;
                 }
+                Some(rendezvous_message::Union::HttpProxyRequest(req)) => {
+                    // 1.4.9 use-raw-tcp-for-api: forward the client's API request
+                    // to the configured api server over the secure rendezvous
+                    // channel and return the response.
+                    let resp = crate::api_integration::http_proxy(req).await;
+                    let mut msg_out = RendezvousMessage::new();
+                    msg_out.set_http_proxy_response(resp);
+                    Self::send_to_sink(sink, msg_out).await;
+                    return true;
+                }
                 _ => {}
             }
         }
@@ -698,6 +717,14 @@ impl RendezvousServer {
         } else if !self.check_ip_blocker(&ip, &id).await {
             return Err(TOO_FREQUENT);
             //return Err(send_rk_res(socket, addr, TOO_FREQUENT).await);
+        }
+        // 1.4.9: gate registration on device deployment when enabled. The client
+        // then runs `rustdesk --deploy` to provision the device. Fails open when
+        // the api integration is unreachable (see api_integration::device_deployed).
+        if crate::api_integration::deploy_enabled()
+            && !crate::api_integration::device_deployed(&id).await
+        {
+            return Err(register_pk_response::Result::NOT_DEPLOYED);
         }
         let peer = self.pm.get_or(&id).await;
         let (changed, ip_changed) = {
@@ -894,6 +921,9 @@ impl RendezvousServer {
         ws: bool,
     ) -> ResultType<(RendezvousMessage, Option<SocketAddr>)> {
         let mut ph = ph;
+        // Capture the controlling user's token before MUST_LOGIN handling moves it,
+        // so we can mint a conn_audit_ref for 1.4.9 controller-user attribution.
+        let controller_token = ph.token.clone();
         if !key.is_empty() && ph.licence_key != key {
             log::warn!(
                 "Authentication failed from {} for peer {} - invalid key",
@@ -996,6 +1026,13 @@ impl RendezvousServer {
                     }
                 });
             let socket_addr = AddrMangle::encode(addr).into();
+            // 1.4.9: mint a conn_audit_ref (once) so the controlled peer can echo
+            // it back and let the api attribute the audit to the controlling user.
+            let controlled_context = crate::api_integration::mint_conn_audit_ref(&controller_token)
+                .map(|reff| ControlledContext {
+                    conn_audit_ref: reff,
+                    ..Default::default()
+                });
             if same_intranet {
                 log::debug!(
                     "Fetch local addr {:?} {:?} request from {:?}",
@@ -1006,6 +1043,7 @@ impl RendezvousServer {
                 msg_out.set_fetch_local_addr(FetchLocalAddr {
                     socket_addr,
                     relay_server,
+                    controlled_context: MessageField::from_option(controlled_context),
                     ..Default::default()
                 });
             } else {
@@ -1019,6 +1057,7 @@ impl RendezvousServer {
                     socket_addr,
                     nat_type: ph.nat_type,
                     relay_server,
+                    controlled_context: MessageField::from_option(controlled_context),
                     ..Default::default()
                 });
             }
