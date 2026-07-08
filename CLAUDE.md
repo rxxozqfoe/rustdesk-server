@@ -64,6 +64,9 @@ Environment variables (also configurable via INI file with `--config`):
 | `KEY` | Encryption key (`_` = accept any key) |
 | `MUST_LOGIN` | Require login to connect (`Y`/`N`, default `N`) |
 | `RUSTDESK_API_JWT_KEY` | JWT secret for API token validation |
+| `RUSTDESK_API_SERVER` | Base URL of rustdesk-api for 1.4.9 integration (HTTP proxy, audit attribution, deploy) |
+| `HBBS_API_TOKEN` | Shared secret matching the api's `hbbs.token` (enables the hbbs↔api integration) |
+| `DEPLOY_ENABLED` | `Y`/`1`/`TRUE` to gate registration on `rustdesk --deploy` provisioning (NOT_DEPLOYED) |
 | `LIMIT_SPEED` / `SINGLE_BANDWIDTH` / `TOTAL_BANDWIDTH` | Rate limiting |
 | `DOWNGRADE_START_CHECK` / `DOWNGRADE_THRESHOLD` | Connection downgrade tuning |
 
