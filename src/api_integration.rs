@@ -135,8 +135,27 @@ pub async fn http_proxy(req: HttpProxyRequest) -> HttpProxyResponse {
             return out;
         }
     };
-    let url = format!("{}{}", *API_SERVER, req.path);
-    let mut builder = CLIENT.request(method, &url);
+    // Build the target URL by parsing the fixed api server and overwriting only
+    // the path/query components. String concatenation is unsafe here: a client
+    // path like "@evil.com/x" would turn "http://api:21114" into
+    // "http://api:21114@evil.com/x", moving the host to evil.com (SSRF). Using
+    // set_path/set_query keeps the host locked to RUSTDESK_API_SERVER.
+    let url = match reqwest::Url::parse(&API_SERVER) {
+        Ok(mut base) => {
+            let (path, query) = match req.path.split_once('?') {
+                Some((p, q)) => (p, Some(q)),
+                None => (req.path.as_str(), None),
+            };
+            base.set_path(path);
+            base.set_query(query);
+            base
+        }
+        Err(err) => {
+            out.error = format!("invalid api server url: {}", err);
+            return out;
+        }
+    };
+    let mut builder = CLIENT.request(method, url);
     for h in req.headers.iter() {
         builder = builder.header(&h.name, &h.value);
     }
