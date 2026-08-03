@@ -80,7 +80,7 @@ jobs:
       # helpers:pinGitHubActionDigestsToSemver preset) will keep the
       # inline comment in sync with future semver bumps.
       - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@0105f7c440bc8084c17cad47fe92e63049519458 # v2.0.18
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check advisories sources
           arguments: --all-features
