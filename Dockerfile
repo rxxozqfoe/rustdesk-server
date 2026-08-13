@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 #
 # Both stages use Chainguard images instead of the Docker Hub
 # rust:bookworm + debian:bookworm-slim pair. Chainguard publishes
