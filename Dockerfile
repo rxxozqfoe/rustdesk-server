@@ -15,7 +15,7 @@
 # rustc 1.95.0 (the version pinned by rust-toolchain.toml), make,
 # pkgconf and apk. Default user is nonroot, so switch to root for the
 # apk installs and the cargo install.
-FROM cgr.dev/chainguard/rust:latest-dev@sha256:90c1dcb5dc075764ce9630493eee58a22ca28033152accd0401cdf931924708f AS builder
+FROM cgr.dev/chainguard/rust:latest-dev@sha256:9d7d7e9ee88701aa191f28cd00bbd41adb0c54823c9c2546507e860d0c70ee5d AS builder
 USER root
 WORKDIR /work
 # Single RUN: hadolint DL3059 (consecutive RUN instructions). --root
@@ -32,7 +32,7 @@ RUN cargo build --release
 # ca-certificates-bundle out of the box; only sqlite-libs needs to be
 # pulled in for the hbbs/hbbr/rustdesk-utils binaries to dlopen at
 # runtime.
-FROM cgr.dev/chainguard/wolfi-base:latest@sha256:315732e5ca8b9f9285ed36ce9a5bb2a99f700ca8f0570d7061f9a4987fcf6688
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:08df5982c3d27e70a4ce1607e3bb9af09d746f8722cf135a7694afef879fc5a2
 RUN apk add --no-cache sqlite-libs
 COPY --from=builder /work/target/release/hbbs /usr/bin/hbbs
 COPY --from=builder /work/target/release/hbbr /usr/bin/hbbr
