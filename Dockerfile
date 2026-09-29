@@ -23,13 +23,18 @@
 # the apk installs and the cargo install. The rustc used is the one
 # pinned by rust-toolchain.toml (the same one CI lints with), not the
 # image's default; the build fails if rustup does not honour the pin.
+# The image's cargo/rustc on PATH are apk-packaged binaries, not rustup
+# proxies, so they ignore rust-toolchain.toml. The pinned toolchain's
+# directory is therefore linked to a fixed path that leads PATH.
 # openssl-dev: hbb_common pulls in native-tls -> openssl-sys.
 FROM cgr.dev/chainguard/rust:latest-dev@sha256:90c1dcb5dc075764ce9630493eee58a22ca28033152accd0401cdf931924708f AS chef
 USER root
 WORKDIR /work
+ENV PATH="/opt/rust-toolchain/bin:${PATH}"
 COPY rust-toolchain.toml ./
 RUN apk add --no-cache openssl-dev protobuf-dev sqlite-dev && \
     rustup toolchain install && \
+    ln -s "$(dirname "$(dirname "$(rustup which rustc)")")" /opt/rust-toolchain && \
     pinned="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" && \
     case "$(rustc --version)" in \
       "rustc ${pinned} "*) ;; \
