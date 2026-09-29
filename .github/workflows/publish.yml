@@ -147,7 +147,9 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
       # Per-platform cache scopes so the two runners don't clobber each
-      # other's gha cache. sbom + provenance attach BuildKit's OCI
+      # other's gha cache. linux-amd64 is the same scope the Trivy scan
+      # build in _validate.yml uses, so the amd64 build reuses the layers
+      # the validate job (and the forapi push before it) already built. sbom + provenance attach BuildKit's OCI
       # attestations; imagetools create in the merge job carries them
       # into the final manifest list.
       - name: Build and push by digest

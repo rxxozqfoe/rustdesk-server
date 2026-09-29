@@ -1,0 +1,7 @@
+# Keep the build context small and free of local build state. The
+# `COPY . .` steps in the Dockerfile would otherwise ship a local target/
+# (gigabytes) and a local SQLite DB into the builder. .sqlx/ must NOT be
+# listed here: the image compiles the sqlx::query! macros offline from it.
+.git
+target
+db_v2.sqlite3*

@@ -10,7 +10,7 @@ A fork of [lejianwen/rustdesk-server](https://github.com/lejianwen/rustdesk-serv
 - Adds `MUST_LOGIN` env var: defaults to `N`; set to `Y` to require the client to be logged in before a connection is accepted.
 - Adds `RUSTDESK_API_JWT_KEY`: when set, hbbs validates the JWT issued by rustdesk-api.
 - Adds client WebSocket support (client version ≥ 1.4.1).
-- Switches sqlx to online mode with bundled SQLite migrations (`migrations/`); `make init-db` is required before the first build.
+- Uses sqlx compile-time checked queries with bundled SQLite migrations (`migrations/`). The query metadata is committed in `.sqlx/`, so `SQLX_OFFLINE=true` builds need no database; development builds check against a local DB created by `make init-db`.
 
 ## Published image
 
@@ -86,7 +86,9 @@ make init-db                                                       # create the 
 cargo build --release
 ```
 
-> **Note:** This project uses sqlx compile-time SQL validation (online mode). You must run `make init-db` before the first build so a local database with the correct schema exists.
+> **Note:** This project uses sqlx compile-time SQL validation. With `DATABASE_URL` set (the checked-in `.env` sets it), the queries are checked against the local database, so run `make init-db` before the first build. To build without a database, use `SQLX_OFFLINE=true cargo build --release`, which compiles against the committed `.sqlx/` metadata. After changing a `sqlx::query!`, run `make sqlx-prepare` and commit `.sqlx/`; CI fails if it is stale.
+>
+> The toolchain is pinned in `rust-toolchain.toml`; rustup installs it on the first `cargo` call.
 
 Other database commands:
 

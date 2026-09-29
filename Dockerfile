@@ -10,30 +10,56 @@
 # The free Chainguard registry only ships floating :latest / :latest-dev
 # tags; Renovate's docker:pinDigests preset keeps the @sha256 references
 # below current.
+#
+# Build layout (cargo-chef): `chef` holds the toolchain, `planner`
+# reduces the workspace to a dependency recipe, and `builder` compiles
+# the dependencies from that recipe in their own layer before copying
+# the sources. A source-only change reuses the cached dependency layer
+# instead of recompiling the whole dependency tree; the layer is rebuilt
+# only when Cargo.toml / Cargo.lock change.
 
-# Stage 1: Build — Chainguard rust:latest-dev ships rustup, cargo,
-# rustc 1.95.0 (the version pinned by rust-toolchain.toml), make,
-# pkgconf and apk. Default user is nonroot, so switch to root for the
-# apk installs and the cargo install.
-FROM cgr.dev/chainguard/rust:latest-dev@sha256:90c1dcb5dc075764ce9630493eee58a22ca28033152accd0401cdf931924708f AS builder
+# Stage 1: Toolchain — Chainguard rust:latest-dev ships rustup, cargo,
+# make, pkgconf and apk. Default user is nonroot, so switch to root for
+# the apk installs and the cargo install. The rustc used is the one
+# pinned by rust-toolchain.toml (the same one CI lints with), not the
+# image's default; the build fails if rustup does not honour the pin.
+# openssl-dev: hbb_common pulls in native-tls -> openssl-sys.
+FROM cgr.dev/chainguard/rust:latest-dev@sha256:90c1dcb5dc075764ce9630493eee58a22ca28033152accd0401cdf931924708f AS chef
 USER root
 WORKDIR /work
-# Single RUN: hadolint DL3059 (consecutive RUN instructions). --root
-# /usr/local on cargo install so the sqlx binary lands in a PATH that
-# `make init-db` can resolve without ENV gymnastics.
-RUN apk add --no-cache protobuf-dev sqlite-dev && \
-    cargo install --root /usr/local sqlx-cli --version '~0.8' --no-default-features --features sqlite,rustls
+COPY rust-toolchain.toml ./
+RUN apk add --no-cache openssl-dev protobuf-dev sqlite-dev && \
+    rustup toolchain install && \
+    pinned="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" && \
+    case "$(rustc --version)" in \
+      "rustc ${pinned} "*) ;; \
+      *) echo "rustc $(rustc --version) does not match rust-toolchain.toml (${pinned})" >&2; exit 1 ;; \
+    esac && \
+    cargo install --locked --root /usr/local cargo-chef --version 0.1.78
+# sqlx::query! macros compile against the committed .sqlx/ metadata
+# instead of a live database, so no sqlx-cli / `make init-db` here.
+# Migrations are still embedded by sqlx::migrate!() and run at startup.
+ENV SQLX_OFFLINE=true
+
+# Stage 2: Dependency recipe. Only recipe.json leaves this stage, and it
+# changes only when the manifests or the lockfile do.
+FROM chef AS planner
 COPY . .
-ENV DATABASE_URL=sqlite:./db_v2.sqlite3
-RUN make init-db
+RUN cargo chef prepare --recipe-path recipe.json
+
+# Stage 3: Build — dependencies first (cached layer), then the sources.
+FROM chef AS builder
+COPY --from=planner /work/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
 RUN cargo build --release
 
-# Stage 2: Runtime — Chainguard wolfi-base ships apk and
-# ca-certificates-bundle out of the box; only sqlite-libs needs to be
-# pulled in for the hbbs/hbbr/rustdesk-utils binaries to dlopen at
+# Stage 4: Runtime — Chainguard wolfi-base ships apk and
+# ca-certificates-bundle out of the box; sqlite-libs and libssl3 are
+# pulled in for the hbbs/hbbr/rustdesk-utils binaries to load at
 # runtime.
 FROM cgr.dev/chainguard/wolfi-base:latest@sha256:315732e5ca8b9f9285ed36ce9a5bb2a99f700ca8f0570d7061f9a4987fcf6688
-RUN apk add --no-cache sqlite-libs
+RUN apk add --no-cache libssl3 sqlite-libs
 COPY --from=builder /work/target/release/hbbs /usr/bin/hbbs
 COPY --from=builder /work/target/release/hbbr /usr/bin/hbbr
 COPY --from=builder /work/target/release/rustdesk-utils /usr/bin/rustdesk-utils
