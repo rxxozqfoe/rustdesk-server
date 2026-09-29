@@ -59,11 +59,20 @@ static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
 // next retry (the client retries every 30s).
 const DEPLOYED_TTL: Duration = Duration::from_secs(300);
 const NOT_DEPLOYED_TTL: Duration = Duration::from_secs(10);
+// A controller retries punch-hole/relay requests; reuse one ref per
+// (controller token, target id) for this long instead of minting a new one.
+const AUDIT_REF_REUSE: Duration = Duration::from_secs(60);
+// Cap on conn_audit_ref records sent to the api per second, so a flood of
+// forged requests cannot be amplified into api/database load.
+const AUDIT_REF_MAX_PER_SEC: u32 = 50;
 const CACHE_MAX_ENTRIES: usize = 10_000;
 
 type TimedCache<K, V> = Mutex<HashMap<K, (V, Instant)>>;
 // (device id, base64 uuid, base64 pk) -> deployed
 static DEPLOY_CACHE: Lazy<TimedCache<(String, String, String), bool>> = Lazy::new(Default::default);
+// (controller token, target peer id) -> conn_audit_ref
+static AUDIT_REFS: Lazy<TimedCache<(String, String), String>> = Lazy::new(Default::default);
+static AUDIT_REF_RATE: Lazy<Mutex<(Instant, u32)>> = Lazy::new(|| Mutex::new((Instant::now(), 0)));
 
 /// Whether RegisterPk should be checked against the api's deploy gate.
 pub fn deploy_gate_active() -> bool {
@@ -149,19 +158,51 @@ pub async fn device_deployed(id: &str, uuid: &str, pk: &str) -> bool {
     deployed
 }
 
-/// Mint an unguessable conn_audit_ref for a controlling connection and record
-/// the ref -> controller-user snapshot with the api (fire-and-forget). Returns
-/// None when the integration is disabled or no controller token is present.
-pub fn mint_conn_audit_ref(token: &str) -> Option<String> {
+/// Returns false once AUDIT_REF_MAX_PER_SEC records were sent this second.
+fn audit_ref_rate_ok() -> bool {
+    let mut rate = AUDIT_REF_RATE.lock().unwrap();
+    if rate.0.elapsed() >= Duration::from_secs(1) {
+        *rate = (Instant::now(), 0);
+    }
+    if rate.1 >= AUDIT_REF_MAX_PER_SEC {
+        return false;
+    }
+    rate.1 += 1;
+    true
+}
+
+/// Mint an unguessable conn_audit_ref for a controlling connection to `peer_id`
+/// and record the ref -> controller-user snapshot with the api (fire-and-
+/// forget). Retries within AUDIT_REF_REUSE get the same ref. Returns None when
+/// the integration is disabled, no usable controller token is present, or the
+/// record rate limit is hit (the connection then simply has no attribution).
+pub fn mint_conn_audit_ref(token: &str, peer_id: &str) -> Option<String> {
     if !enabled() || token.is_empty() {
         return None;
     }
-    let reff = Uuid::new_v4().to_string();
-    let token = token.to_string();
-    let ref_clone = reff.clone();
+    // Same check MUST_LOGIN uses: with the api's JWT key configured, tokens
+    // that do not verify locally never reach the api.
+    if !crate::jwt::SECRET.is_empty() && crate::jwt::verify_token(token).is_err() {
+        return None;
+    }
+    let key = (token.to_owned(), peer_id.to_owned());
+    let mut refs = AUDIT_REFS.lock().unwrap();
+    if let Some((audit_ref, tm)) = refs.get(&key) {
+        if tm.elapsed() < AUDIT_REF_REUSE {
+            return Some(audit_ref.clone());
+        }
+    }
+    if !audit_ref_rate_ok() {
+        log::warn!("conn-audit-ref rate limit hit, skipping attribution");
+        return None;
+    }
+    let audit_ref = Uuid::new_v4().to_string();
+    prune(&mut refs, |_| AUDIT_REF_REUSE);
+    refs.insert(key, (audit_ref.clone(), Instant::now()));
+    drop(refs);
+    let body = serde_json::json!({ "ref": audit_ref, "token": token });
     tokio::spawn(async move {
         let url = format!("{}/api/hbbs/conn-audit-ref", *API_SERVER);
-        let body = serde_json::json!({ "ref": ref_clone, "token": token });
         if let Err(err) = CLIENT
             .post(&url)
             .header("Authorization", auth_header())
@@ -172,7 +213,7 @@ pub fn mint_conn_audit_ref(token: &str) -> Option<String> {
             log::warn!("conn-audit-ref record error: {}", err);
         }
     });
-    Some(reff)
+    Some(audit_ref)
 }
 
 /// Forward an HttpProxyRequest to the fixed api server and return the response.

@@ -564,7 +564,7 @@ impl RendezvousServer {
                         // back to attribute the audit to the controlling user.
                         rf.control_permissions = Default::default();
                         rf.controlled_context = MessageField::from_option(
-                            crate::api_integration::mint_conn_audit_ref(&rf.token).map(
+                            crate::api_integration::mint_conn_audit_ref(&rf.token, &rf.id).map(
                                 |conn_audit_ref| ControlledContext {
                                     conn_audit_ref,
                                     ..Default::default()
@@ -1056,11 +1056,13 @@ impl RendezvousServer {
             let socket_addr = AddrMangle::encode(addr).into();
             // 1.4.9: mint a conn_audit_ref (once) so the controlled peer can echo
             // it back and let the api attribute the audit to the controlling user.
-            let controlled_context = crate::api_integration::mint_conn_audit_ref(&controller_token)
-                .map(|reff| ControlledContext {
-                    conn_audit_ref: reff,
-                    ..Default::default()
-                });
+            let controlled_context =
+                crate::api_integration::mint_conn_audit_ref(&controller_token, &id).map(
+                    |conn_audit_ref| ControlledContext {
+                        conn_audit_ref,
+                        ..Default::default()
+                    },
+                );
             if same_intranet {
                 log::debug!(
                     "Fetch local addr {:?} {:?} request from {:?}",
