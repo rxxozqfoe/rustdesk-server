@@ -398,7 +398,7 @@ impl RendezvousServer {
             match msg_in.union {
                 Some(rendezvous_message::Union::RegisterPeer(rp)) if !rp.id.is_empty() => {
                     // B registered
-                    log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
+                    log::trace!("New peer registered: {:?} {:?}", rp.id, addr);
                     let request_pk = self.update_addr(rp.id, addr).await;
                     let mut msg_out = RendezvousMessage::new();
                     msg_out.set_register_peer_response(RegisterPeerResponse {
@@ -522,7 +522,7 @@ impl RendezvousServer {
             match msg_in.union {
                 Some(rendezvous_message::Union::RegisterPeer(rp)) if !rp.id.is_empty() => {
                     // B registered
-                    log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
+                    log::trace!("New peer registered: {:?} {:?}", rp.id, addr);
                     let request_pk = self.update_addr(rp.id, addr).await;
                     let mut msg_out = RendezvousMessage::new();
                     msg_out.set_register_peer_response(RegisterPeerResponse {
@@ -900,8 +900,8 @@ impl RendezvousServer {
         log::debug!(
             "{} punch hole response to {:?} from {:?}",
             if socket.is_none() { "TCP" } else { "UDP" },
-            &addr_a,
-            &addr
+            addr_a,
+            addr
         );
         let mut msg_out = RendezvousMessage::new();
         let mut p = PunchHoleResponse {
@@ -934,8 +934,8 @@ impl RendezvousServer {
         log::debug!(
             "{} local addrs response to {:?} from {:?}",
             if socket.is_none() { "TCP" } else { "UDP" },
-            &addr_a,
-            &addr
+            addr_a,
+            addr
         );
         let mut msg_out = RendezvousMessage::new();
         let mut p = PunchHoleResponse {
