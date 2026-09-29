@@ -398,7 +398,7 @@ impl RendezvousServer {
             match msg_in.union {
                 Some(rendezvous_message::Union::RegisterPeer(rp)) if !rp.id.is_empty() => {
                     // B registered
-                    log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
+                    log::trace!("New peer registered: {:?} {:?}", rp.id, addr);
                     let request_pk = self.update_addr(rp.id, addr).await;
                     let mut msg_out = RendezvousMessage::new();
                     msg_out.set_register_peer_response(RegisterPeerResponse {
@@ -417,6 +417,22 @@ impl RendezvousServer {
                     }
                 }
                 Some(rendezvous_message::Union::RegisterPk(rk)) => {
+                    if crate::api_integration::deploy_gate_active() {
+                        // The deploy gate may wait on an api request; answer from a
+                        // task so a slow api never stalls this loop.
+                        let mut me = self.clone();
+                        tokio::spawn(async move {
+                            let res = me.handle_register_pk(rk, addr, false).await;
+                            let result = res.unwrap_or_else(|err| err);
+                            let mut msg_out = RendezvousMessage::new();
+                            msg_out.set_register_pk_response(RegisterPkResponse {
+                                result: result.into(),
+                                ..Default::default()
+                            });
+                            me.tx.send(Data::Msg(msg_out.into(), addr)).ok();
+                        });
+                        return Ok(());
+                    }
                     let response = self.handle_register_pk(rk, addr, false).await;
                     match response {
                         Err(err) => {
@@ -506,7 +522,7 @@ impl RendezvousServer {
             match msg_in.union {
                 Some(rendezvous_message::Union::RegisterPeer(rp)) if !rp.id.is_empty() => {
                     // B registered
-                    log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
+                    log::trace!("New peer registered: {:?} {:?}", rp.id, addr);
                     let request_pk = self.update_addr(rp.id, addr).await;
                     let mut msg_out = RendezvousMessage::new();
                     msg_out.set_register_peer_response(RegisterPeerResponse {
@@ -540,6 +556,21 @@ impl RendezvousServer {
                     if let Some(peer) = self.pm.get_in_memory(&rf.id).await {
                         let mut msg_out = RendezvousMessage::new();
                         rf.socket_addr = AddrMangle::encode(addr).into();
+                        // 1.4.9: control_permissions and controlled_context are
+                        // server-issued. The controlled peer lets control_permissions
+                        // override its local settings, so never forward what the
+                        // controller put there; hbbs issues no permissions and only
+                        // its own conn_audit_ref, which the controlled peer echoes
+                        // back to attribute the audit to the controlling user.
+                        rf.control_permissions = Default::default();
+                        rf.controlled_context = MessageField::from_option(
+                            crate::api_integration::mint_conn_audit_ref(&rf.token, &rf.id).map(
+                                |conn_audit_ref| ControlledContext {
+                                    conn_audit_ref,
+                                    ..Default::default()
+                                },
+                            ),
+                        );
                         msg_out.set_request_relay(rf);
                         let peer_addr = peer.read().await.socket_addr;
                         self.tx.send(Data::Msg(msg_out.into(), peer_addr)).ok();
@@ -659,6 +690,30 @@ impl RendezvousServer {
                     });
                     Self::send_to_sink(sink, msg_out).await;
                 }
+                Some(rendezvous_message::Union::HttpProxyRequest(req)) => {
+                    // 1.4.9 use-raw-tcp-for-api: forward the client's API request
+                    // to the configured api server and return the response. Only
+                    // over a channel encrypted by KeyExchange (the client runs
+                    // secure_tcp first): the requests carry passwords and tokens.
+                    // Refused requests make the client fall back to plain HTTP.
+                    let encrypted = match sink.as_ref() {
+                        Some(Sink::Tss(s)) => s.encrypt.is_some(),
+                        Some(Sink::Wss(s)) => s.encrypt.is_some(),
+                        None => false,
+                    };
+                    let resp = if encrypted {
+                        crate::api_integration::http_proxy(req, addr.ip()).await
+                    } else {
+                        let mut resp = HttpProxyResponse::new();
+                        resp.error =
+                            "http proxy requires an encrypted rendezvous connection".to_owned();
+                        resp
+                    };
+                    let mut msg_out = RendezvousMessage::new();
+                    msg_out.set_http_proxy_response(resp);
+                    Self::send_to_sink(sink, msg_out).await;
+                    return true;
+                }
                 _ => {}
             }
         }
@@ -747,6 +802,20 @@ impl RendezvousServer {
         req_pk.0 += 1;
         req_pk.1 = Instant::now();
         peer.write().await.reg_pk = req_pk;
+        // 1.4.9: gate registration on device deployment. Checked only after the
+        // local uuid/pk and rate checks, so the api is asked about devices hbbs
+        // would otherwise accept; the client then runs `rustdesk --deploy`.
+        // Fails open when the api is unreachable (see device_deployed).
+        if crate::api_integration::deploy_gate_active()
+            && !crate::api_integration::device_deployed(
+                &id,
+                &base64::encode(&rk.uuid),
+                &base64::encode(&rk.pk),
+            )
+            .await
+        {
+            return Err(register_pk_response::Result::NOT_DEPLOYED);
+        }
         if ip_changed {
             let mut lock = IP_CHANGES.lock().await;
             if let Some((tm, ips)) = lock.get_mut(&id) {
@@ -831,8 +900,8 @@ impl RendezvousServer {
         log::debug!(
             "{} punch hole response to {:?} from {:?}",
             if socket.is_none() { "TCP" } else { "UDP" },
-            &addr_a,
-            &addr
+            addr_a,
+            addr
         );
         let mut msg_out = RendezvousMessage::new();
         let mut p = PunchHoleResponse {
@@ -865,8 +934,8 @@ impl RendezvousServer {
         log::debug!(
             "{} local addrs response to {:?} from {:?}",
             if socket.is_none() { "TCP" } else { "UDP" },
-            &addr_a,
-            &addr
+            addr_a,
+            addr
         );
         let mut msg_out = RendezvousMessage::new();
         let mut p = PunchHoleResponse {
@@ -894,6 +963,9 @@ impl RendezvousServer {
         ws: bool,
     ) -> ResultType<(RendezvousMessage, Option<SocketAddr>)> {
         let mut ph = ph;
+        // Capture the controlling user's token before MUST_LOGIN handling moves it,
+        // so we can mint a conn_audit_ref for 1.4.9 controller-user attribution.
+        let controller_token = ph.token.clone();
         if !key.is_empty() && ph.licence_key != key {
             log::warn!(
                 "Authentication failed from {} for peer {} - invalid key",
@@ -996,6 +1068,15 @@ impl RendezvousServer {
                     }
                 });
             let socket_addr = AddrMangle::encode(addr).into();
+            // 1.4.9: mint a conn_audit_ref (once) so the controlled peer can echo
+            // it back and let the api attribute the audit to the controlling user.
+            let controlled_context =
+                crate::api_integration::mint_conn_audit_ref(&controller_token, &id).map(
+                    |conn_audit_ref| ControlledContext {
+                        conn_audit_ref,
+                        ..Default::default()
+                    },
+                );
             if same_intranet {
                 log::debug!(
                     "Fetch local addr {:?} {:?} request from {:?}",
@@ -1006,6 +1087,7 @@ impl RendezvousServer {
                 msg_out.set_fetch_local_addr(FetchLocalAddr {
                     socket_addr,
                     relay_server,
+                    controlled_context: MessageField::from_option(controlled_context),
                     ..Default::default()
                 });
             } else {
@@ -1019,6 +1101,7 @@ impl RendezvousServer {
                     socket_addr,
                     nat_type: ph.nat_type,
                     relay_server,
+                    controlled_context: MessageField::from_option(controlled_context),
                     ..Default::default()
                 });
             }
