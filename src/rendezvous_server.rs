@@ -692,9 +692,23 @@ impl RendezvousServer {
                 }
                 Some(rendezvous_message::Union::HttpProxyRequest(req)) => {
                     // 1.4.9 use-raw-tcp-for-api: forward the client's API request
-                    // to the configured api server over the secure rendezvous
-                    // channel and return the response.
-                    let resp = crate::api_integration::http_proxy(req).await;
+                    // to the configured api server and return the response. Only
+                    // over a channel encrypted by KeyExchange (the client runs
+                    // secure_tcp first): the requests carry passwords and tokens.
+                    // Refused requests make the client fall back to plain HTTP.
+                    let encrypted = match sink.as_ref() {
+                        Some(Sink::Tss(s)) => s.encrypt.is_some(),
+                        Some(Sink::Wss(s)) => s.encrypt.is_some(),
+                        None => false,
+                    };
+                    let resp = if encrypted {
+                        crate::api_integration::http_proxy(req, addr.ip()).await
+                    } else {
+                        let mut resp = HttpProxyResponse::new();
+                        resp.error =
+                            "http proxy requires an encrypted rendezvous connection".to_owned();
+                        resp
+                    };
                     let mut msg_out = RendezvousMessage::new();
                     msg_out.set_http_proxy_response(resp);
                     Self::send_to_sink(sink, msg_out).await;

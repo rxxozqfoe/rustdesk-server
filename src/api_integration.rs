@@ -25,6 +25,7 @@ use std::{
     collections::HashMap,
     env,
     hash::Hash,
+    net::IpAddr,
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -73,6 +74,37 @@ static DEPLOY_CACHE: Lazy<TimedCache<(String, String, String), bool>> = Lazy::ne
 // (controller token, target peer id) -> conn_audit_ref
 static AUDIT_REFS: Lazy<TimedCache<(String, String), String>> = Lazy::new(Default::default);
 static AUDIT_REF_RATE: Lazy<Mutex<(Instant, u32)>> = Lazy::new(|| Mutex::new((Instant::now(), 0)));
+
+// Request headers never forwarded to the api: hop-by-hop headers, ones reqwest
+// derives itself, and client-asserted forwarding headers (replaced below with
+// the real peer address).
+const DROP_REQUEST_HEADERS: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+    "content-length",
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-real-ip",
+];
+const DROP_RESPONSE_HEADERS: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
 
 /// Whether RegisterPk should be checked against the api's deploy gate.
 pub fn deploy_gate_active() -> bool {
@@ -219,7 +251,9 @@ pub fn mint_conn_audit_ref(token: &str, peer_id: &str) -> Option<String> {
 /// Forward an HttpProxyRequest to the fixed api server and return the response.
 /// The client supplies only the path, never the host, so this cannot be used to
 /// reach arbitrary hosts (SSRF is bounded to the configured api server).
-pub async fn http_proxy(req: HttpProxyRequest) -> HttpProxyResponse {
+/// `peer_ip` is the client's address, passed on as X-Forwarded-For / X-Real-IP
+/// so the api's per-IP login limits apply per client rather than to hbbs.
+pub async fn http_proxy(req: HttpProxyRequest, peer_ip: IpAddr) -> HttpProxyResponse {
     let mut out = HttpProxyResponse::new();
     if !enabled() {
         out.error = "hbbs api integration is not configured".to_owned();
@@ -254,8 +288,14 @@ pub async fn http_proxy(req: HttpProxyRequest) -> HttpProxyResponse {
     };
     let mut builder = CLIENT.request(method, url);
     for h in req.headers.iter() {
-        builder = builder.header(&h.name, &h.value);
+        if !DROP_REQUEST_HEADERS.contains(&h.name.to_lowercase().as_str()) {
+            builder = builder.header(&h.name, &h.value);
+        }
     }
+    let peer_ip = peer_ip.to_string();
+    builder = builder
+        .header("X-Forwarded-For", &peer_ip)
+        .header("X-Real-IP", &peer_ip);
     if !req.body.is_empty() {
         builder = builder.body(req.body.to_vec());
     }
@@ -264,6 +304,9 @@ pub async fn http_proxy(req: HttpProxyRequest) -> HttpProxyResponse {
             out.status = resp.status().as_u16() as i32;
             let mut headers = Vec::new();
             for (k, v) in resp.headers().iter() {
+                if DROP_RESPONSE_HEADERS.contains(&k.as_str()) {
+                    continue;
+                }
                 if let Ok(val) = v.to_str() {
                     headers.push(HeaderEntry {
                         name: k.as_str().to_owned(),
