@@ -7,7 +7,9 @@
 // Configuration (environment variables):
 //   RUSTDESK_API_SERVER  base URL of rustdesk-api, e.g. http://127.0.0.1:21114
 //   HBBS_API_TOKEN       shared secret matching the api's `hbbs.token`
-//   DEPLOY_ENABLED       Y/1/TRUE to enable the device deployment gate
+//   DEPLOY_ENABLED       Y/1/TRUE to consult the api's deploy gate on RegisterPk.
+//                        The api's `hbbs.deploy-enabled` decides the answer, so
+//                        leaving it off there keeps every device deployed.
 //
 // All calls fail open: when the integration is unconfigured or the api is
 // unreachable, hbbs behaves as before (no gating, no attribution).
@@ -19,7 +21,13 @@ use hbb_common::{
     uuid::Uuid,
 };
 use once_cell::sync::Lazy;
-use std::env;
+use std::{
+    collections::HashMap,
+    env,
+    hash::Hash,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 static API_SERVER: Lazy<String> = Lazy::new(|| {
     env::var("RUSTDESK_API_SERVER")
@@ -40,14 +48,26 @@ static DEPLOY_ENABLED: Lazy<bool> = Lazy::new(|| {
 
 static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(Duration::from_secs(10))
         .build()
         .unwrap_or_default()
 });
 
-/// Whether the device-deployment gate is enabled.
-pub fn deploy_enabled() -> bool {
-    *DEPLOY_ENABLED
+// Deploy-gate answers are cached so a registration storm (e.g. every device
+// re-registering after an hbbs restart) is not one api request per device.
+// "Not deployed" expires quickly so a freshly deployed device gets in on its
+// next retry (the client retries every 30s).
+const DEPLOYED_TTL: Duration = Duration::from_secs(300);
+const NOT_DEPLOYED_TTL: Duration = Duration::from_secs(10);
+const CACHE_MAX_ENTRIES: usize = 10_000;
+
+type TimedCache<K, V> = Mutex<HashMap<K, (V, Instant)>>;
+// (device id, base64 uuid, base64 pk) -> deployed
+static DEPLOY_CACHE: Lazy<TimedCache<(String, String, String), bool>> = Lazy::new(Default::default);
+
+/// Whether RegisterPk should be checked against the api's deploy gate.
+pub fn deploy_gate_active() -> bool {
+    *DEPLOY_ENABLED && enabled()
 }
 
 /// Whether the hbbs<->api integration is usable (api server + token configured).
@@ -59,38 +79,74 @@ fn auth_header() -> String {
     format!("Bearer {}", *HBBS_TOKEN)
 }
 
-/// Query whether a device id has been provisioned via `rustdesk --deploy`.
-/// Fails open (returns true) when the integration is disabled or the api errors,
-/// so a transient api outage never blocks registration.
-pub async fn device_deployed(id: &str) -> bool {
+/// Drop expired entries once a cache grows past CACHE_MAX_ENTRIES; clear it if
+/// that is not enough (only possible under a flood of distinct keys).
+fn prune<K: Eq + Hash, V>(map: &mut HashMap<K, (V, Instant)>, ttl: impl Fn(&V) -> Duration) {
+    if map.len() < CACHE_MAX_ENTRIES {
+        return;
+    }
+    map.retain(|_, (v, tm)| tm.elapsed() < ttl(v));
+    if map.len() >= CACHE_MAX_ENTRIES {
+        map.clear();
+    }
+}
+
+/// Ask the api whether the device (id + base64 uuid/pk, as the client sends
+/// them to /api/devices/deploy) is provisioned via `rustdesk --deploy`.
+/// Fails open (returns true) when the integration is disabled or the api
+/// errors, so a transient api outage never blocks registration.
+pub async fn device_deployed(id: &str, uuid: &str, pk: &str) -> bool {
     if !enabled() {
         return true;
+    }
+    let key = (id.to_owned(), uuid.to_owned(), pk.to_owned());
+    if let Some((deployed, tm)) = DEPLOY_CACHE.lock().unwrap().get(&key) {
+        let ttl = if *deployed {
+            DEPLOYED_TTL
+        } else {
+            NOT_DEPLOYED_TTL
+        };
+        if tm.elapsed() < ttl {
+            return *deployed;
+        }
     }
     let url = format!("{}/api/hbbs/device-deployed", *API_SERVER);
     let res = CLIENT
         .get(&url)
         .header("Authorization", auth_header())
-        .query(&[("id", id)])
+        .query(&[("id", id), ("uuid", uuid), ("pk", pk)])
         .send()
         .await;
-    match res {
+    let deployed = match res {
         Ok(resp) => match resp.json::<serde_json::Value>().await {
             // api envelope: { code, message, data: { deployed } }
-            Ok(v) => v
-                .get("data")
-                .and_then(|d| d.get("deployed"))
-                .and_then(|b| b.as_bool())
-                .unwrap_or(true),
+            Ok(v) => match v.pointer("/data/deployed").and_then(|b| b.as_bool()) {
+                Some(deployed) => deployed,
+                None => {
+                    log::warn!("device_deployed: unexpected api response {}", v);
+                    return true;
+                }
+            },
             Err(err) => {
                 log::warn!("device_deployed decode error: {}", err);
-                true
+                return true;
             }
         },
         Err(err) => {
             log::warn!("device_deployed request error: {}", err);
-            true
+            return true;
         }
-    }
+    };
+    let mut cache = DEPLOY_CACHE.lock().unwrap();
+    prune(&mut cache, |deployed| {
+        if *deployed {
+            DEPLOYED_TTL
+        } else {
+            NOT_DEPLOYED_TTL
+        }
+    });
+    cache.insert(key, (deployed, Instant::now()));
+    deployed
 }
 
 /// Mint an unguessable conn_audit_ref for a controlling connection and record

@@ -417,6 +417,22 @@ impl RendezvousServer {
                     }
                 }
                 Some(rendezvous_message::Union::RegisterPk(rk)) => {
+                    if crate::api_integration::deploy_gate_active() {
+                        // The deploy gate may wait on an api request; answer from a
+                        // task so a slow api never stalls this loop.
+                        let mut me = self.clone();
+                        tokio::spawn(async move {
+                            let res = me.handle_register_pk(rk, addr, false).await;
+                            let result = res.unwrap_or_else(|err| err);
+                            let mut msg_out = RendezvousMessage::new();
+                            msg_out.set_register_pk_response(RegisterPkResponse {
+                                result: result.into(),
+                                ..Default::default()
+                            });
+                            me.tx.send(Data::Msg(msg_out.into(), addr)).ok();
+                        });
+                        return Ok(());
+                    }
                     let response = self.handle_register_pk(rk, addr, false).await;
                     match response {
                         Err(err) => {
@@ -718,14 +734,6 @@ impl RendezvousServer {
             return Err(TOO_FREQUENT);
             //return Err(send_rk_res(socket, addr, TOO_FREQUENT).await);
         }
-        // 1.4.9: gate registration on device deployment when enabled. The client
-        // then runs `rustdesk --deploy` to provision the device. Fails open when
-        // the api integration is unreachable (see api_integration::device_deployed).
-        if crate::api_integration::deploy_enabled()
-            && !crate::api_integration::device_deployed(&id).await
-        {
-            return Err(register_pk_response::Result::NOT_DEPLOYED);
-        }
         let peer = self.pm.get_or(&id).await;
         let (changed, ip_changed) = {
             let peer = peer.read().await;
@@ -774,6 +782,20 @@ impl RendezvousServer {
         req_pk.0 += 1;
         req_pk.1 = Instant::now();
         peer.write().await.reg_pk = req_pk;
+        // 1.4.9: gate registration on device deployment. Checked only after the
+        // local uuid/pk and rate checks, so the api is asked about devices hbbs
+        // would otherwise accept; the client then runs `rustdesk --deploy`.
+        // Fails open when the api is unreachable (see device_deployed).
+        if crate::api_integration::deploy_gate_active()
+            && !crate::api_integration::device_deployed(
+                &id,
+                &base64::encode(&rk.uuid),
+                &base64::encode(&rk.pk),
+            )
+            .await
+        {
+            return Err(register_pk_response::Result::NOT_DEPLOYED);
+        }
         if ip_changed {
             let mut lock = IP_CHANGES.lock().await;
             if let Some((tm, ips)) = lock.get_mut(&id) {
