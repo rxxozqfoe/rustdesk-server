@@ -27,7 +27,7 @@
 # proxies, so they ignore rust-toolchain.toml. The pinned toolchain's
 # directory is therefore linked to a fixed path that leads PATH.
 # openssl-dev: hbb_common pulls in native-tls -> openssl-sys.
-FROM cgr.dev/chainguard/rust:latest-dev@sha256:90c1dcb5dc075764ce9630493eee58a22ca28033152accd0401cdf931924708f AS chef
+FROM cgr.dev/chainguard/rust:latest-dev@sha256:80beb4904bcba0b5f138140ab816148961859573e2ccbb5e9d28ea9d279bf54d AS chef
 USER root
 WORKDIR /work
 ENV PATH="/opt/rust-toolchain/bin:${PATH}"
@@ -63,7 +63,7 @@ RUN cargo build --release
 # ca-certificates-bundle out of the box; sqlite-libs and libssl3 are
 # pulled in for the hbbs/hbbr/rustdesk-utils binaries to load at
 # runtime.
-FROM cgr.dev/chainguard/wolfi-base:latest@sha256:315732e5ca8b9f9285ed36ce9a5bb2a99f700ca8f0570d7061f9a4987fcf6688
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:bef0f4d47edc72a93d1537eae54eb53db2b2cc352c028128ff0f16c5b5a3c1e4
 RUN apk add --no-cache libssl3 sqlite-libs
 COPY --from=builder /work/target/release/hbbs /usr/bin/hbbs
 COPY --from=builder /work/target/release/hbbr /usr/bin/hbbr
