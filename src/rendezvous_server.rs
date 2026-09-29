@@ -556,15 +556,21 @@ impl RendezvousServer {
                     if let Some(peer) = self.pm.get_in_memory(&rf.id).await {
                         let mut msg_out = RendezvousMessage::new();
                         rf.socket_addr = AddrMangle::encode(addr).into();
-                        // 1.4.9: attribute the audit to the controlling user by
-                        // injecting a conn_audit_ref the controlled peer echoes back.
-                        if let Some(reff) = crate::api_integration::mint_conn_audit_ref(&rf.token) {
-                            rf.controlled_context =
-                                MessageField::from_option(Some(ControlledContext {
-                                    conn_audit_ref: reff,
+                        // 1.4.9: control_permissions and controlled_context are
+                        // server-issued. The controlled peer lets control_permissions
+                        // override its local settings, so never forward what the
+                        // controller put there; hbbs issues no permissions and only
+                        // its own conn_audit_ref, which the controlled peer echoes
+                        // back to attribute the audit to the controlling user.
+                        rf.control_permissions = Default::default();
+                        rf.controlled_context = MessageField::from_option(
+                            crate::api_integration::mint_conn_audit_ref(&rf.token).map(
+                                |conn_audit_ref| ControlledContext {
+                                    conn_audit_ref,
                                     ..Default::default()
-                                }));
-                        }
+                                },
+                            ),
+                        );
                         msg_out.set_request_relay(rf);
                         let peer_addr = peer.read().await.socket_addr;
                         self.tx.send(Data::Msg(msg_out.into(), peer_addr)).ok();
