@@ -26,7 +26,8 @@
 # The image's cargo/rustc on PATH are apk-packaged binaries, not rustup
 # proxies, so they ignore rust-toolchain.toml. The pinned toolchain's
 # directory is therefore linked to a fixed path that leads PATH.
-# openssl-dev: hbb_common pulls in native-tls -> openssl-sys.
+# openssl-dev: hbb_common enables tokio-tungstenite's native-tls on every
+# target (since the 1.4.9 protocol bump), so openssl-sys links OpenSSL.
 FROM cgr.dev/chainguard/rust:latest-dev@sha256:80beb4904bcba0b5f138140ab816148961859573e2ccbb5e9d28ea9d279bf54d AS chef
 USER root
 WORKDIR /work
@@ -60,11 +61,11 @@ COPY . .
 RUN cargo build --release
 
 # Stage 4: Runtime — Chainguard wolfi-base ships apk and
-# ca-certificates-bundle out of the box; sqlite-libs and libssl3 are
-# pulled in for the hbbs/hbbr/rustdesk-utils binaries to load at
-# runtime.
+# ca-certificates-bundle out of the box; sqlite-libs and libssl3 (with
+# libcrypto3) need to be pulled in for the hbbs/hbbr/rustdesk-utils
+# binaries to load at runtime.
 FROM cgr.dev/chainguard/wolfi-base:latest@sha256:bef0f4d47edc72a93d1537eae54eb53db2b2cc352c028128ff0f16c5b5a3c1e4
-RUN apk add --no-cache libssl3 sqlite-libs
+RUN apk add --no-cache sqlite-libs libssl3
 COPY --from=builder /work/target/release/hbbs /usr/bin/hbbs
 COPY --from=builder /work/target/release/hbbr /usr/bin/hbbr
 COPY --from=builder /work/target/release/rustdesk-utils /usr/bin/rustdesk-utils
