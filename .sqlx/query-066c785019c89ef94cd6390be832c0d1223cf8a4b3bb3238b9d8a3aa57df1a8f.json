@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into peer(guid, id, uuid, pk, info) values(?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "066c785019c89ef94cd6390be832c0d1223cf8a4b3bb3238b9d8a3aa57df1a8f"
+}

@@ -96,6 +96,24 @@
     "dependencyDashboardApproval": false  // bypass the Dashboard approval gate
   },
 
+  // --- Rust toolchain ---------------------------------------------------
+  // rust-toolchain.toml pins the exact rustc that CI and the Dockerfile
+  // builder use. Renovate has no built-in manager for that file, so this
+  // regex manager tracks rust-lang/rust releases. Each bump arrives as a
+  // normal PR (subject to minimumReleaseAge above), and CI shows any new
+  // clippy findings on that PR instead of on an unrelated one.
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Rust toolchain pinned in rust-toolchain.toml.",
+      "managerFilePatterns": ["/(^|/)rust-toolchain\\.toml$/"],
+      "matchStrings": ["channel\\s*=\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""],
+      "depNameTemplate": "rust",
+      "packageNameTemplate": "rust-lang/rust",
+      "datasourceTemplate": "github-releases"
+    }
+  ],
+
   "packageRules": [
     // Both container base images get periodic digest refreshes from
     // their upstream publishers; one grouped PR is less noise than two

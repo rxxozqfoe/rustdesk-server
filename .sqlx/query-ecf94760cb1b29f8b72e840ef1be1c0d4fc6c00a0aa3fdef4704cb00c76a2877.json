@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "update peer set id=?, pk=?, info=? where guid=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "ecf94760cb1b29f8b72e840ef1be1c0d4fc6c00a0aa3fdef4704cb00c76a2877"
+}

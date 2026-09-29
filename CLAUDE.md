@@ -23,6 +23,9 @@ cargo run                # hbbs (rendezvous server, default-run)
 cargo run --bin hbbr     # relay server
 cargo run --bin rustdesk-utils  # key generation & diagnostics
 
+# The toolchain is pinned in rust-toolchain.toml (CI and the Dockerfile
+# use the same one; Renovate bumps it).
+
 # Lint, format, check (matches CI). `cargo test` is intentionally NOT
 # part of the CI gate. fmt/clippy are scoped to the `hbbs` package
 # (`-p hbbs`) and clippy uses `--no-deps` so the upstream-vendored
@@ -70,7 +73,7 @@ Environment variables (also configurable via INI file with `--config`):
 | `LIMIT_SPEED` / `SINGLE_BANDWIDTH` / `TOTAL_BANDWIDTH` | Rate limiting |
 | `DOWNGRADE_START_CHECK` / `DOWNGRADE_THRESHOLD` | Connection downgrade tuning |
 
-## Database (SQLx Online Mode)
+## Database (SQLx, offline metadata committed)
 
 Schema is managed via sqlx migrations in `migrations/`. First-time setup:
 
@@ -86,13 +89,14 @@ make reset-db      # Drop and recreate database
 ```
 
 - `DATABASE_URL` in `.env` points to the SQLite file (default: `sqlite:./db_v2.sqlite3`)
-- `sqlx::query!` macros validate SQL at compile time against the live database (online mode)
+- `sqlx::query!` macros validate SQL at compile time. With `DATABASE_URL` set (as in `.env`) they check against the live database; with `SQLX_OFFLINE=true` they use the committed `.sqlx/` metadata instead
+- After adding or changing a query, run `make sqlx-prepare` and commit `.sqlx/`. CI runs `cargo sqlx prepare --check` and fails if it is stale
+- The Docker image builds with `SQLX_OFFLINE=true` (no sqlx-cli, no DB) and uses cargo-chef so dependencies are cached in their own layer
 - The server also runs `sqlx::migrate!()` at startup, so `cargo run` auto-migrates
-- `.sqlx/` offline cache is not used — CI must run `make init-db` before `cargo build`
 
 ## Notable Dependencies
 
-- **sqlx 0.8** with compile-time SQL validation (online mode) — requires `make init-db` before first build
+- **sqlx 0.8** with compile-time SQL validation — requires `make init-db` before the first online build, or `SQLX_OFFLINE=true`
 - **sodiumoxide** for ed25519 signing and encryption
 - **axum 0.5** for HTTP endpoints
 - **tokio-tungstenite 0.17** for WebSocket support

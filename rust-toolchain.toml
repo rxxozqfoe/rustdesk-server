@@ -1,0 +1,11 @@
+# Single source of truth for the Rust toolchain. Read by rustup (local
+# builds), by actions-rust-lang/setup-rust-toolchain in CI, and by the
+# Dockerfile builder stage, so all three compile with the same rustc and
+# lint with the same clippy. Pinning keeps the CI rust-cache key stable
+# (a floating `stable` starts cold on every release) and stops new
+# clippy lints from breaking CI without a code change. Renovate bumps
+# the version via the customManager in renovate.json.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

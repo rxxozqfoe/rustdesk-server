@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "select guid, id, uuid, pk, user, status, info from peer where id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "guid",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "uuid",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "pk",
+        "ordinal": 3,
+        "type_info": "Blob"
+      },
+      {
+        "name": "user",
+        "ordinal": 4,
+        "type_info": "Blob"
+      },
+      {
+        "name": "status",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "info",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "ee49c9f9b7195ecbd4ae35430b804d4db71a6232977674854b7cf18d7dc4565a"
+}
