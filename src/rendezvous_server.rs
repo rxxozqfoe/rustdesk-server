@@ -655,13 +655,26 @@ impl RendezvousServer {
                     }
                     log::trace!("KeyExchange their_pk: {:?}", hex::encode(&ex.keys[0]));
                     log::trace!("KeyExchange box: {:?}", hex::encode(&ex.keys[1]));
-                    let their_pk: [u8; 32] = ex.keys[0].to_vec().try_into().unwrap();
-                    let cryptobox: [u8; 48] = ex.keys[1].to_vec().try_into().unwrap();
-                    let symetric_key = get_symetric_key_from_msg(
+                    // Unauthenticated input: a malformed message must close this
+                    // connection, not panic (panic = "abort" takes hbbs down).
+                    let (Ok(their_pk), Ok(cryptobox)) = (
+                        <[u8; 32]>::try_from(&ex.keys[0][..]),
+                        <[u8; 48]>::try_from(&ex.keys[1][..]),
+                    ) else {
+                        log::error!("Handshake failed: invalid phase 2 key sizes from {}", addr);
+                        return false;
+                    };
+                    let Some(symetric_key) = get_symetric_key_from_msg(
                         self.inner.secure_tcp_sk_b.0,
                         their_pk,
                         &cryptobox,
-                    );
+                    ) else {
+                        log::error!(
+                            "Handshake failed: cannot open the phase 2 box from {}",
+                            addr
+                        );
+                        return false;
+                    };
                     log::debug!("KeyExchange symetric key: {:?}", hex::encode(symetric_key));
                     let key = secretbox::Key::from_slice(&symetric_key);
                     match key {
@@ -1757,17 +1770,11 @@ fn get_symetric_key_from_msg(
     our_sk_b: [u8; 32],
     their_pk_b: [u8; 32],
     sealed_value: &[u8; 48],
-) -> [u8; 32] {
+) -> Option<[u8; 32]> {
     let their_pk_b = box_::PublicKey(their_pk_b);
     let nonce = box_::Nonce([0u8; box_::NONCEBYTES]);
     let sk = box_::SecretKey(our_sk_b);
-    let key = box_::open(sealed_value, &nonce, &their_pk_b, &sk);
-    match key {
-        Ok(key) => {
-            let mut key_array = [0u8; 32];
-            key_array.copy_from_slice(&key);
-            key_array
-        }
-        Err(e) => panic!("Error while opening the seal key{:?}", e),
-    }
+    // Fails for any box not sealed to our key, i.e. anything a client made up.
+    let key = box_::open(sealed_value, &nonce, &their_pk_b, &sk).ok()?;
+    key.try_into().ok()
 }
