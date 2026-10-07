@@ -226,6 +226,12 @@ enum LoopFailure {
 impl RendezvousServer {
     #[tokio::main(flavor = "multi_thread")]
     pub async fn start(port: i32, serial: i32, key: &str, rmem: usize) -> ResultType<()> {
+        // Set libsodium up while hbbs is still single-threaded: every
+        // connection draws a key pair, and libsodium's random source is not
+        // safe to initialise lazily from concurrent connection tasks.
+        if hbb_common::sodiumoxide::init().is_err() {
+            bail!("failed to initialise libsodium");
+        }
         let (key, sk) = Self::get_server_sk(key);
         let nat_port = port - 1;
         let ws_port = port + 2;
