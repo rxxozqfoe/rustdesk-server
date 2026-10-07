@@ -41,7 +41,7 @@ use crate::jwt;
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     sync::Arc,
     time::Instant,
 };
@@ -157,6 +157,29 @@ static MUST_LOGIN: AtomicBool = AtomicBool::new(false);
 /// split-key scheme below is version 1; a newer hbb_common version needs its
 /// own review before this may go higher.
 static KX_MAX_VERSION: AtomicU32 = AtomicU32::new(1);
+// Key exchanges since the last summary line, by outcome.
+static KX_V0: AtomicU64 = AtomicU64::new(0);
+static KX_V1: AtomicU64 = AtomicU64::new(0);
+static KX_FAILED: AtomicU64 = AtomicU64::new(0);
+const KX_SUMMARY_INTERVAL: Duration = Duration::from_secs(600);
+
+/// Every KX_SUMMARY_INTERVAL, logs how the key exchanges since the last line
+/// went, skipping intervals without any.
+fn spawn_kx_summary() {
+    tokio::spawn(async {
+        let mut timer = interval(KX_SUMMARY_INTERVAL);
+        timer.tick().await; // the first tick fires at once
+        loop {
+            timer.tick().await;
+            let v1 = KX_V1.swap(0, Ordering::Relaxed);
+            let v0 = KX_V0.swap(0, Ordering::Relaxed);
+            let failed = KX_FAILED.swap(0, Ordering::Relaxed);
+            if v1 + v0 + failed > 0 {
+                log::info!("key exchange (10 min): v1={v1} v0={v0} failed={failed}");
+            }
+        }
+    });
+}
 
 // Store punch hole requests
 use once_cell::sync::Lazy;
@@ -297,6 +320,7 @@ impl RendezvousServer {
             other => log::warn!("KX_MAX_VERSION={other} is not 0 or 1, using 1"),
         }
         log::info!("KX_MAX_VERSION={}", KX_MAX_VERSION.load(Ordering::SeqCst));
+        spawn_kx_summary();
         if test_addr.to_lowercase() != "no" {
             let test_addr = if test_addr.is_empty() {
                 listener.local_addr()?
@@ -716,6 +740,8 @@ impl RendezvousServer {
                     };
                     match result {
                         Ok(enc) => {
+                            let counter = if ex.version == 0 { &KX_V0 } else { &KX_V1 };
+                            counter.fetch_add(1, Ordering::Relaxed);
                             conn.rx = Some(enc.clone());
                             if let Some(sink) = sink.as_mut() {
                                 match sink {
@@ -727,6 +753,7 @@ impl RendezvousServer {
                             return true;
                         }
                         Err(err) => {
+                            KX_FAILED.fetch_add(1, Ordering::Relaxed);
                             log::error!("Handshake failed from {}: {}", addr, err);
                             return false;
                         }
