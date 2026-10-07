@@ -92,6 +92,17 @@ impl Sink {
         }
     }
 }
+
+/// What the read loop of one TCP or WebSocket connection keeps.
+struct Conn {
+    /// The send half. It is moved into `tcp_punch` or `ws_map` once the
+    /// client asks hbbs to answer on it later.
+    sink: Option<Sink>,
+    /// Decrypts what the client sends once a key exchange has finished.
+    /// Kept apart from the sink, so moving the sink does not stop the read
+    /// loop from decrypting.
+    rx: Option<Encrypt>,
+}
 type Sender = mpsc::UnboundedSender<Data>;
 type Receiver = mpsc::UnboundedReceiver<Data>;
 static ROTATION_RELAY_SERVER: AtomicUsize = AtomicUsize::new(0);
@@ -512,11 +523,12 @@ impl RendezvousServer {
     async fn handle_tcp(
         &mut self,
         bytes: &[u8],
-        sink: &mut Option<Sink>,
+        conn: &mut Conn,
         addr: SocketAddr,
         key: &str,
         ws: bool,
     ) -> bool {
+        let sink = &mut conn.sink;
         if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(bytes) {
             // log::debug!("Received TCP message from {}: {:?}", addr, msg_in);
             match msg_in.union {
@@ -679,10 +691,12 @@ impl RendezvousServer {
                     let key = secretbox::Key::from_slice(&symetric_key);
                     match key {
                         Some(key) => {
+                            let enc = Encrypt::new(key);
+                            conn.rx = Some(enc.clone());
                             if let Some(sink) = sink.as_mut() {
                                 match sink {
-                                    Sink::Wss(s) => s.encrypt = Some(Encrypt::new(key)),
-                                    Sink::Tss(s) => s.encrypt = Some(Encrypt::new(key)),
+                                    Sink::Wss(s) => s.encrypt = Some(enc),
+                                    Sink::Tss(s) => s.encrypt = Some(enc),
                                 }
                             }
                             log::debug!("KeyExchange symetric key set");
@@ -1508,7 +1522,7 @@ impl RendezvousServer {
         key: &str,
         ws: bool,
     ) -> ResultType<()> {
-        let mut sink;
+        let mut conn;
         if ws {
             use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
             let callback = |req: &Request, response: Response| {
@@ -1528,43 +1542,46 @@ impl RendezvousServer {
             };
             let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
             let (a, mut b) = ws_stream.split();
-            sink = Some(Sink::Wss(SafeWsSink {
-                sink: a,
-                encrypt: None,
-            }));
+            conn = Conn {
+                sink: Some(Sink::Wss(SafeWsSink {
+                    sink: a,
+                    encrypt: None,
+                })),
+                rx: None,
+            };
             while let Ok(Some(Ok(msg))) = timeout(30_000, b.next()).await {
                 if let tungstenite::Message::Binary(bytes) = msg {
-                    if !self.handle_tcp(&bytes, &mut sink, addr, key, ws).await {
+                    if !self.handle_tcp(&bytes, &mut conn, addr, key, ws).await {
                         break;
                     }
                 }
             }
         } else {
             let (a, mut b) = Framed::new(stream, BytesCodec::new()).split();
-            sink = Some(Sink::Tss(SafeTcpStreamSink {
-                sink: a,
-                encrypt: None,
-            }));
+            conn = Conn {
+                sink: Some(Sink::Tss(SafeTcpStreamSink {
+                    sink: a,
+                    encrypt: None,
+                })),
+                rx: None,
+            };
             // Avoid key exchange if answering on nat helper port
             if !key.is_empty() {
-                self.key_exchange_phase1(addr, &mut sink).await;
+                self.key_exchange_phase1(addr, &mut conn.sink).await;
             }
             while let Ok(Some(Ok(mut bytes))) = timeout(30_000, b.next()).await {
-                // log::debug!("receive tcp data from {:?} {:?}", addr, bytes);
-                if let Some(Sink::Tss(s)) = sink.as_mut() {
-                    if let Some(key) = s.encrypt.as_mut() {
-                        if let Err(err) = key.dec(&mut bytes) {
-                            log::error!("dec tcp data from {:?} err: {:?}", addr, err);
-                            break;
-                        }
+                if let Some(rx) = conn.rx.as_mut() {
+                    if let Err(err) = rx.dec(&mut bytes) {
+                        log::error!("dec tcp data from {:?} err: {:?}", addr, err);
+                        break;
                     }
                 }
-                if !self.handle_tcp(&bytes, &mut sink, addr, key, ws).await {
+                if !self.handle_tcp(&bytes, &mut conn, addr, key, ws).await {
                     break;
                 }
             }
         }
-        if sink.is_none() {
+        if conn.sink.is_none() {
             self.tcp_punch.lock().await.remove(&try_into_v4(addr));
         }
         log::debug!("Tcp connection from {:?} closed", addr);
