@@ -1,7 +1,9 @@
 use crate::common::*;
 use crate::peer::*;
 use hbb_common::{
-    allow_err, bail,
+    allow_err,
+    anyhow::anyhow,
+    bail,
     bytes::{Bytes, BytesMut},
     bytes_codec::BytesCodec,
     config,
@@ -16,10 +18,10 @@ use hbb_common::{
         register_pk_response::Result::{INVALID_ID_FORMAT, TOO_FREQUENT, UUID_MISMATCH},
         *,
     },
-    sodiumoxide::crypto::{box_, box_::PublicKey, box_::SecretKey, secretbox, sign},
+    sodiumoxide::crypto::{box_, box_::SecretKey, sign},
     sodiumoxide::hex,
     tcp::Encrypt,
-    tcp::{listen_any, FramedStream},
+    tcp::{listen_any, FramedStream, KxTranscript, KX_PARAMS_DOMAIN},
     timeout,
     tokio::{
         self,
@@ -39,7 +41,7 @@ use crate::jwt;
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     sync::Arc,
     time::Instant,
 };
@@ -102,6 +104,47 @@ struct Conn {
     /// Kept apart from the sink, so moving the sink does not stop the read
     /// loop from decrypting.
     rx: Option<Encrypt>,
+    /// The phase-1 secret, until the client's phase 2 consumes it.
+    pending_kx: Option<PendingKx>,
+}
+
+/// The phase-1 half of a key exchange, kept until the client answers.
+struct PendingKx {
+    sk: SecretKey,
+    /// Our ephemeral public key as sent: bit 255 set when v1 was advertised.
+    pk_sent: [u8; box_::PUBLICKEYBYTES],
+    advertised: u32,
+}
+
+impl PendingKx {
+    /// Phase 2: open the client's sealed key and build the cipher for the
+    /// version the client picked.
+    fn finish(self, ex: &KeyExchange) -> ResultType<Encrypt> {
+        if ex.keys.len() != 2 {
+            bail!("expected 2 keys in phase 2, got {}", ex.keys.len());
+        }
+        if ex.version > self.advertised {
+            bail!(
+                "client picked version {} above the advertised {}",
+                ex.version,
+                self.advertised
+            );
+        }
+        let key = Encrypt::decode(&ex.keys[1], &ex.keys[0], &self.sk)?;
+        if ex.version == 0 {
+            return Ok(Encrypt::new(key));
+        }
+        Encrypt::new_split(
+            key,
+            false,
+            &KxTranscript {
+                initiator_pk: &ex.keys[0],
+                responder_pk: &self.pk_sent,
+                advertised: self.advertised,
+                picked: ex.version,
+            },
+        )
+    }
 }
 type Sender = mpsc::UnboundedSender<Data>;
 type Receiver = mpsc::UnboundedReceiver<Data>;
@@ -110,6 +153,10 @@ type RelayServers = Vec<String>;
 const CHECK_RELAY_TIMEOUT: u64 = 3_000;
 static ALWAYS_USE_RELAY: AtomicBool = AtomicBool::new(false);
 static MUST_LOGIN: AtomicBool = AtomicBool::new(false);
+/// The newest key exchange version hbbs advertises (KX_MAX_VERSION). The
+/// split-key scheme below is version 1; a newer hbb_common version needs its
+/// own review before this may go higher.
+static KX_MAX_VERSION: AtomicU32 = AtomicU32::new(1);
 
 // Store punch hole requests
 use once_cell::sync::Lazy;
@@ -132,8 +179,6 @@ struct Inner {
     mask: Option<Ipv4Network>,
     local_ip: String,
     sk: Option<sign::SecretKey>,
-    secure_tcp_pk_b: PublicKey,
-    secure_tcp_sk_b: SecretKey,
 }
 
 #[derive(Clone)]
@@ -185,8 +230,6 @@ impl RendezvousServer {
                     .unwrap_or_default(),
             )
         };
-        // For privacy use per connection key pair
-        let (secure_tcp_pk_b, secure_tcp_sk_b) = box_::gen_keypair();
         let mut rs = Self {
             tcp_punch: Arc::new(Mutex::new(HashMap::new())),
             pm,
@@ -201,8 +244,6 @@ impl RendezvousServer {
                 sk,
                 mask,
                 local_ip,
-                secure_tcp_pk_b,
-                secure_tcp_sk_b,
             }),
             ws_map: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -250,6 +291,12 @@ impl RendezvousServer {
                 "N"
             }
         );
+        match std::env::var("KX_MAX_VERSION").unwrap_or_default().trim() {
+            "" | "1" => {}
+            "0" => KX_MAX_VERSION.store(0, Ordering::SeqCst),
+            other => log::warn!("KX_MAX_VERSION={other} is not 0 or 1, using 1"),
+        }
+        log::info!("KX_MAX_VERSION={}", KX_MAX_VERSION.load(Ordering::SeqCst));
         if test_addr.to_lowercase() != "no" {
             let test_addr = if test_addr.is_empty() {
                 listener.local_addr()?
@@ -661,37 +708,14 @@ impl RendezvousServer {
                 }
                 Some(rendezvous_message::Union::KeyExchange(ex)) => {
                     log::trace!("KeyExchange {:?} <- bytes: {:?}", addr, hex::encode(bytes));
-                    if ex.keys.len() != 2 {
-                        log::error!("Handshake failed: invalid phase 2 key exchange message");
-                        return false;
-                    }
-                    log::trace!("KeyExchange their_pk: {:?}", hex::encode(&ex.keys[0]));
-                    log::trace!("KeyExchange box: {:?}", hex::encode(&ex.keys[1]));
-                    // Unauthenticated input: a malformed message must close this
-                    // connection, not panic (panic = "abort" takes hbbs down).
-                    let (Ok(their_pk), Ok(cryptobox)) = (
-                        <[u8; 32]>::try_from(&ex.keys[0][..]),
-                        <[u8; 48]>::try_from(&ex.keys[1][..]),
-                    ) else {
-                        log::error!("Handshake failed: invalid phase 2 key sizes from {}", addr);
-                        return false;
+                    // Unauthenticated input: anything wrong closes only this
+                    // connection (panic = "abort" would take hbbs down).
+                    let result = match conn.pending_kx.take() {
+                        Some(pending) => pending.finish(&ex),
+                        None => Err(anyhow!("no phase 1 pending on this connection")),
                     };
-                    let Some(symetric_key) = get_symetric_key_from_msg(
-                        self.inner.secure_tcp_sk_b.0,
-                        their_pk,
-                        &cryptobox,
-                    ) else {
-                        log::error!(
-                            "Handshake failed: cannot open the phase 2 box from {}",
-                            addr
-                        );
-                        return false;
-                    };
-                    log::debug!("KeyExchange symetric key: {:?}", hex::encode(symetric_key));
-                    let key = secretbox::Key::from_slice(&symetric_key);
-                    match key {
-                        Some(key) => {
-                            let enc = Encrypt::new(key);
+                    match result {
+                        Ok(enc) => {
                             conn.rx = Some(enc.clone());
                             if let Some(sink) = sink.as_mut() {
                                 match sink {
@@ -699,11 +723,11 @@ impl RendezvousServer {
                                     Sink::Tss(s) => s.encrypt = Some(enc),
                                 }
                             }
-                            log::debug!("KeyExchange symetric key set");
+                            log::debug!("KeyExchange version {} with {}", ex.version, addr);
                             return true;
                         }
-                        None => {
-                            log::error!("KeyExchange symetric key NOT set");
+                        Err(err) => {
+                            log::error!("Handshake failed from {}: {}", addr, err);
                             return false;
                         }
                     }
@@ -1548,6 +1572,7 @@ impl RendezvousServer {
                     encrypt: None,
                 })),
                 rx: None,
+                pending_kx: None,
             };
             while let Ok(Some(Ok(msg))) = timeout(30_000, b.next()).await {
                 if let tungstenite::Message::Binary(bytes) = msg {
@@ -1564,10 +1589,11 @@ impl RendezvousServer {
                     encrypt: None,
                 })),
                 rx: None,
+                pending_kx: None,
             };
             // Avoid key exchange if answering on nat helper port
             if !key.is_empty() {
-                self.key_exchange_phase1(addr, &mut conn.sink).await;
+                self.key_exchange_phase1(addr, &mut conn).await;
             }
             while let Ok(Some(Ok(mut bytes))) = timeout(30_000, b.next()).await {
                 if let Some(rx) = conn.rx.as_mut() {
@@ -1661,26 +1687,39 @@ impl RendezvousServer {
         false
     }
 
-    async fn key_exchange_phase1(&mut self, addr: SocketAddr, sink: &mut Option<Sink>) {
-        let mut msg_out = RendezvousMessage::new();
-        log::debug!("KeyExchange phase 1: send our pk for this tcp connection in a message signed with our server key");
-        let sk = &self.inner.sk;
-        if let Some(sk) = sk {
-            let our_pk_b = self.inner.secure_tcp_pk_b;
-            let sm = sign::sign(&our_pk_b.0, sk);
-
-            let bytes_sm = Bytes::from(sm);
-            msg_out.set_key_exchange(KeyExchange {
-                keys: vec![bytes_sm],
+    async fn key_exchange_phase1(&self, addr: SocketAddr, conn: &mut Conn) {
+        let Some(sk) = &self.inner.sk else {
+            return;
+        };
+        let advertised = KX_MAX_VERSION.load(Ordering::SeqCst);
+        // A fresh pair per connection: v1 binds it into the session keys.
+        let (pk, kx_sk) = box_::gen_keypair();
+        let mut pk_sent = pk.0;
+        let mut ex = KeyExchange::new();
+        if advertised > 0 {
+            // Bit 255 tells a 1.5.0+ client to require signed_params. X25519
+            // ignores it, so older clients use the key unchanged.
+            pk_sent[31] |= 0x80;
+            let params = KxParams {
+                pk: pk_sent.to_vec().into(),
+                version: advertised,
                 ..Default::default()
-            });
-            log::trace!(
-                "KeyExchange {:?} -> bytes: {:?}",
-                addr,
-                hex::encode(Bytes::from(msg_out.write_to_bytes().unwrap()))
-            );
-            Self::send_to_sink(sink, msg_out).await;
+            };
+            let mut signed = KX_PARAMS_DOMAIN.to_vec();
+            signed.extend(params.write_to_bytes().unwrap_or_default());
+            ex.version = advertised;
+            ex.signed_params = sign::sign(&signed, sk).into();
         }
+        ex.keys = vec![sign::sign(&pk_sent, sk).into()];
+        log::trace!("KeyExchange phase 1 to {:?}, version {}", addr, advertised);
+        let mut msg_out = RendezvousMessage::new();
+        msg_out.set_key_exchange(ex);
+        Self::send_to_sink(&mut conn.sink, msg_out).await;
+        conn.pending_kx = Some(PendingKx {
+            sk: kx_sk,
+            pk_sent,
+            advertised,
+        });
     }
 }
 
@@ -1781,17 +1820,4 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
     let s = listen_any(port as _).await?;
     log::debug!("listen on tcp {:?}", s.local_addr());
     Ok(s)
-}
-
-fn get_symetric_key_from_msg(
-    our_sk_b: [u8; 32],
-    their_pk_b: [u8; 32],
-    sealed_value: &[u8; 48],
-) -> Option<[u8; 32]> {
-    let their_pk_b = box_::PublicKey(their_pk_b);
-    let nonce = box_::Nonce([0u8; box_::NONCEBYTES]);
-    let sk = box_::SecretKey(our_sk_b);
-    // Fails for any box not sealed to our key, i.e. anything a client made up.
-    let key = box_::open(sealed_value, &nonce, &their_pk_b, &sk).ok()?;
-    key.try_into().ok()
 }
