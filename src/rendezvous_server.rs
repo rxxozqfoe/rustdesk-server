@@ -108,6 +108,12 @@ impl Sink {
 /// up waiting tasks, and their messages, in hbbs.
 const SEND_TIMEOUT_MS: u64 = 5_000;
 const SEND_MAX_PENDING: usize = 64;
+/// Largest reply hbbs relays to a controller waiting in `tcp_punch`. Real
+/// ones stay well below this (one carrying an SDP_MAX_LEN answer is under
+/// 9 KiB); a bigger one is forged and padded to fill the controller's send
+/// buffer. A connection's own replies, such as HttpProxyResponse, are not
+/// bounded by it.
+const RELAY_MAX_LEN: u64 = 16 * 1024;
 
 /// A connection's send half, shared by its read loop and by `tcp_punch` /
 /// `ws_map` while hbbs may answer on it later.
@@ -115,7 +121,8 @@ struct SinkHandle {
     sink: Mutex<Sink>,
     /// Sends waiting for `sink`; beyond SEND_MAX_PENDING they are dropped.
     pending: AtomicUsize,
-    /// Set once a send timed out or failed; later sends are dropped.
+    /// Set once a send timed out or failed; later sends are dropped and the
+    /// read loop closes the connection, so the client reconnects.
     dead: AtomicBool,
 }
 
@@ -1331,9 +1338,24 @@ impl RendezvousServer {
         Ok(())
     }
 
+    /// The `tcp_punch` connection of `addr`, unless `msg` is over
+    /// RELAY_MAX_LEN.
+    async fn tcp_punch_sink(
+        &self,
+        msg: &RendezvousMessage,
+        addr: SocketAddr,
+    ) -> Option<SharedSink> {
+        let len = msg.compute_size();
+        if len > RELAY_MAX_LEN {
+            log::warn!("dropped a {len}-byte reply to {addr}: over {RELAY_MAX_LEN} bytes");
+            return None;
+        }
+        self.tcp_punch.lock().await.get(&try_into_v4(addr)).cloned()
+    }
+
     #[inline]
     async fn send_to_tcp(&mut self, msg: RendezvousMessage, addr: SocketAddr) {
-        let sink = self.tcp_punch.lock().await.get(&try_into_v4(addr)).cloned();
+        let sink = self.tcp_punch_sink(&msg, addr).await;
         if let Some(sink) = sink {
             tokio::spawn(async move {
                 Self::send_to_sink(&sink, msg).await;
@@ -1368,7 +1390,7 @@ impl RendezvousServer {
         msg: RendezvousMessage,
         addr: SocketAddr,
     ) -> ResultType<()> {
-        let sink = self.tcp_punch.lock().await.get(&try_into_v4(addr)).cloned();
+        let sink = self.tcp_punch_sink(&msg, addr).await;
         if let Some(sink) = sink {
             Self::send_to_sink(&sink, msg).await;
         }
@@ -1803,6 +1825,9 @@ impl RendezvousServer {
                 ice_count: 0,
             };
             while let Ok(Some(Ok(msg))) = timeout(30_000, b.next()).await {
+                if conn.sink.dead.load(Ordering::Relaxed) {
+                    break;
+                }
                 if let tungstenite::Message::Binary(bytes) = msg {
                     if !self.handle_tcp(&bytes, &mut conn, addr, key, ws).await {
                         break;
@@ -1826,6 +1851,9 @@ impl RendezvousServer {
                 self.key_exchange_phase1(addr, &mut conn).await;
             }
             while let Ok(Some(Ok(mut bytes))) = timeout(30_000, b.next()).await {
+                if conn.sink.dead.load(Ordering::Relaxed) {
+                    break;
+                }
                 if let Some(rx) = conn.rx.as_mut() {
                     if let Err(err) = rx.dec(&mut bytes) {
                         log::error!("dec tcp data from {:?} err: {:?}", addr, err);
