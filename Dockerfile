@@ -28,7 +28,7 @@
 # directory is therefore linked to a fixed path that leads PATH.
 # openssl-dev: hbb_common enables tokio-tungstenite's native-tls on every
 # target (since the 1.4.9 protocol bump), so openssl-sys links OpenSSL.
-FROM cgr.dev/chainguard/rust:latest-dev@sha256:80beb4904bcba0b5f138140ab816148961859573e2ccbb5e9d28ea9d279bf54d AS chef
+FROM cgr.dev/chainguard/rust:latest-dev@sha256:a49db2b86858d768069e0a6cc31ecfe6383302a45c5f7c4b7a48d1d672ccfc4b AS chef
 USER root
 WORKDIR /work
 ENV PATH="/opt/rust-toolchain/bin:${PATH}"
@@ -64,7 +64,7 @@ RUN cargo build --release
 # ca-certificates-bundle out of the box; sqlite-libs and libssl3 (with
 # libcrypto3) need to be pulled in for the hbbs/hbbr/rustdesk-utils
 # binaries to load at runtime.
-FROM cgr.dev/chainguard/wolfi-base:latest@sha256:bef0f4d47edc72a93d1537eae54eb53db2b2cc352c028128ff0f16c5b5a3c1e4
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:05d24163df148be377275af8374c16523a1dc7e19bf4f1c689784791553c5e45
 RUN apk add --no-cache sqlite-libs libssl3
 COPY --from=builder /work/target/release/hbbs /usr/bin/hbbs
 COPY --from=builder /work/target/release/hbbr /usr/bin/hbbr
