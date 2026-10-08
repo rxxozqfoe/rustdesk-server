@@ -998,6 +998,7 @@ impl RendezvousServer {
             socket_addr: AddrMangle::encode(addr).into(),
             pk: self.get_pk(&phs.version, phs.id).await,
             relay_server: phs.relay_server.clone(),
+            webrtc_sdp_answer: phs.webrtc_sdp_answer.clone(),
             ..Default::default()
         };
         if let Ok(t) = phs.nat_type.enum_value() {
@@ -1142,7 +1143,11 @@ impl RendezvousServer {
             let peer_is_lan = self.is_lan(peer_addr);
             let is_lan = self.is_lan(addr);
             let mut relay_server = self.get_relay_server(addr.ip(), peer_addr.ip());
-            if ALWAYS_USE_RELAY.load(Ordering::SeqCst) || (peer_is_lan ^ is_lan) {
+            // When hbbs forces the relay, WebRTC must not race it, so the
+            // offer is not forwarded (a relay the client asked for keeps it).
+            let server_forced_relay =
+                ALWAYS_USE_RELAY.load(Ordering::SeqCst) || (peer_is_lan ^ is_lan);
+            if server_forced_relay {
                 if peer_is_lan {
                     // https://github.com/rustdesk/rustdesk-server/issues/24
                     relay_server = self.inner.local_ip.clone()
@@ -1187,11 +1192,17 @@ impl RendezvousServer {
                     peer_addr,
                     addr
                 );
+                let webrtc_sdp_offer = if server_forced_relay {
+                    String::new()
+                } else {
+                    std::mem::take(&mut ph.webrtc_sdp_offer)
+                };
                 msg_out.set_punch_hole(PunchHole {
                     socket_addr,
                     nat_type: ph.nat_type,
                     relay_server,
                     controlled_context: MessageField::from_option(controlled_context),
+                    webrtc_sdp_offer,
                     ..Default::default()
                 });
             }
