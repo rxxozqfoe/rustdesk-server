@@ -14,7 +14,7 @@ networks:
 services:
   hbbs:
     container_name: rustdesk-hbbs
-    image: ghcr.io/rxxozqfoe/rustdesk-server:latest
+    image: ghcr.io/rxxozqfoe/rustdesk-server:latest@sha256:9f0a4e17c6faa2d89140b7af8c58cb3d213d6d0c05e8ae4b54f0c02915ce64d9
     # Replace <relay-server-ip[:21117]> with the host/IP reachable by
     # clients. Set MUST_LOGIN / KEY / RUSTDESK_API_JWT_KEY / etc. via
     # `environment:` if you use them.
@@ -34,7 +34,7 @@ services:
 
   hbbr:
     container_name: rustdesk-hbbr
-    image: ghcr.io/rxxozqfoe/rustdesk-server:latest
+    image: ghcr.io/rxxozqfoe/rustdesk-server:latest@sha256:9f0a4e17c6faa2d89140b7af8c58cb3d213d6d0c05e8ae4b54f0c02915ce64d9
     command: hbbr
     ports:
       - "21117:21117"
