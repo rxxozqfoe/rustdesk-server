@@ -95,11 +95,15 @@ impl Sink {
     }
 }
 
+/// A connection's send half, shared by its read loop and by `tcp_punch` /
+/// `ws_map` while hbbs may answer on it later.
+type SharedSink = Arc<Mutex<Sink>>;
+
 /// What the read loop of one TCP or WebSocket connection keeps.
 struct Conn {
-    /// The send half. It is moved into `tcp_punch` or `ws_map` once the
-    /// client asks hbbs to answer on it later.
-    sink: Option<Sink>,
+    /// The send half, also held by `tcp_punch` / `ws_map` once the client
+    /// asks hbbs to answer on it later.
+    sink: SharedSink,
     /// Decrypts what the client sends once a key exchange has finished.
     /// Kept apart from the sink, so moving the sink does not stop the read
     /// loop from decrypting.
@@ -206,14 +210,14 @@ struct Inner {
 
 #[derive(Clone)]
 pub struct RendezvousServer {
-    tcp_punch: Arc<Mutex<HashMap<SocketAddr, Sink>>>,
+    tcp_punch: Arc<Mutex<HashMap<SocketAddr, SharedSink>>>,
     pm: PeerMap,
     tx: Sender,
     relay_servers: Arc<RelayServers>,
     relay_servers0: Arc<RelayServers>,
     rendezvous_servers: Arc<Vec<String>>,
     inner: Arc<Inner>,
-    ws_map: Arc<Mutex<HashMap<SocketAddr, Sink>>>,
+    ws_map: Arc<Mutex<HashMap<SocketAddr, SharedSink>>>,
 }
 
 enum LoopFailure {
@@ -605,7 +609,7 @@ impl RendezvousServer {
         key: &str,
         ws: bool,
     ) -> bool {
-        let sink = &mut conn.sink;
+        let sink = &conn.sink;
         if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(bytes) {
             // log::debug!("Received TCP message from {}: {:?}", addr, msg_in);
             match msg_in.union {
@@ -630,18 +634,22 @@ impl RendezvousServer {
                     }
                 }
                 Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
-                    // there maybe several attempt, so sink can be none
-                    if let Some(sink) = sink.take() {
-                        self.tcp_punch.lock().await.insert(try_into_v4(addr), sink);
-                    }
+                    // Answers, and in 1.5.0 ICE candidates, come back through
+                    // tcp_punch; retries just refresh the entry.
+                    self.tcp_punch
+                        .lock()
+                        .await
+                        .insert(try_into_v4(addr), sink.clone());
                     allow_err!(self.handle_tcp_punch_hole_request(addr, ph, key, ws).await);
                     return true;
                 }
                 Some(rendezvous_message::Union::RequestRelay(mut rf)) => {
-                    // there maybe several attempt, so sink can be none
-                    if let Some(sink) = sink.take() {
-                        self.tcp_punch.lock().await.insert(try_into_v4(addr), sink);
-                    }
+                    // Answers, and in 1.5.0 ICE candidates, come back through
+                    // tcp_punch; retries just refresh the entry.
+                    self.tcp_punch
+                        .lock()
+                        .await
+                        .insert(try_into_v4(addr), sink.clone());
                     if let Some(peer) = self.pm.get_in_memory(&rf.id).await {
                         let mut msg_out = RendezvousMessage::new();
                         rf.socket_addr = AddrMangle::encode(addr).into();
@@ -728,9 +736,10 @@ impl RendezvousServer {
                             Self::send_to_sink(sink, msg_out).await;
                             if ws {
                                 // for ws, we can only get addr when register_pk
-                                if let Some(sink) = sink.take() {
-                                    self.ws_map.lock().await.insert(try_into_v4(addr), sink);
-                                }
+                                self.ws_map
+                                    .lock()
+                                    .await
+                                    .insert(try_into_v4(addr), sink.clone());
                             }
                             return true;
                         }
@@ -749,11 +758,9 @@ impl RendezvousServer {
                             let counter = if ex.version == 0 { &KX_V0 } else { &KX_V1 };
                             counter.fetch_add(1, Ordering::Relaxed);
                             conn.rx = Some(enc.clone());
-                            if let Some(sink) = sink.as_mut() {
-                                match sink {
-                                    Sink::Wss(s) => s.encrypt = Some(enc),
-                                    Sink::Tss(s) => s.encrypt = Some(enc),
-                                }
+                            match &mut *sink.lock().await {
+                                Sink::Wss(s) => s.encrypt = Some(enc),
+                                Sink::Tss(s) => s.encrypt = Some(enc),
                             }
                             log::debug!("KeyExchange version {} with {}", ex.version, addr);
                             return true;
@@ -780,10 +787,9 @@ impl RendezvousServer {
                     // over a channel encrypted by KeyExchange (the client runs
                     // secure_tcp first): the requests carry passwords and tokens.
                     // Refused requests make the client fall back to plain HTTP.
-                    let encrypted = match sink.as_ref() {
-                        Some(Sink::Tss(s)) => s.encrypt.is_some(),
-                        Some(Sink::Wss(s)) => s.encrypt.is_some(),
-                        None => false,
+                    let encrypted = match &*sink.lock().await {
+                        Sink::Tss(s) => s.encrypt.is_some(),
+                        Sink::Wss(s) => s.encrypt.is_some(),
                     };
                     let resp = if encrypted {
                         crate::api_integration::http_proxy(req, addr.ip()).await
@@ -1221,17 +1227,17 @@ impl RendezvousServer {
 
     #[inline]
     async fn send_to_tcp(&mut self, msg: RendezvousMessage, addr: SocketAddr) {
-        let mut tcp = self.tcp_punch.lock().await.remove(&try_into_v4(addr));
-        tokio::spawn(async move {
-            Self::send_to_sink(&mut tcp, msg).await;
-        });
+        let sink = self.tcp_punch.lock().await.get(&try_into_v4(addr)).cloned();
+        if let Some(sink) = sink {
+            tokio::spawn(async move {
+                Self::send_to_sink(&sink, msg).await;
+            });
+        }
     }
 
     #[inline]
-    async fn send_to_sink(sink: &mut Option<Sink>, msg: RendezvousMessage) {
-        if let Some(sink) = sink.as_mut() {
-            sink.send(&msg).await;
-        }
+    async fn send_to_sink(sink: &SharedSink, msg: RendezvousMessage) {
+        sink.lock().await.send(&msg).await;
     }
 
     #[inline]
@@ -1240,8 +1246,10 @@ impl RendezvousServer {
         msg: RendezvousMessage,
         addr: SocketAddr,
     ) -> ResultType<()> {
-        let mut sink = self.tcp_punch.lock().await.remove(&try_into_v4(addr));
-        Self::send_to_sink(&mut sink, msg).await;
+        let sink = self.tcp_punch.lock().await.get(&try_into_v4(addr)).cloned();
+        if let Some(sink) = sink {
+            Self::send_to_sink(&sink, msg).await;
+        }
         Ok(())
     }
 
@@ -1255,9 +1263,9 @@ impl RendezvousServer {
     ) -> ResultType<()> {
         let (msg, to_addr) = self.handle_punch_hole_request(addr, ph, key, ws).await?;
         if let Some(addr) = to_addr {
-            let mut sink = self.ws_map.lock().await.remove(&try_into_v4(addr));
-            if let Some(s) = sink.as_mut() {
-                s.send(&msg).await;
+            let sink = self.ws_map.lock().await.get(&try_into_v4(addr)).cloned();
+            if let Some(s) = sink {
+                Self::send_to_sink(&s, msg).await;
             } else {
                 self.tx.send(Data::Msg(msg.into(), addr))?;
             }
@@ -1600,10 +1608,10 @@ impl RendezvousServer {
             let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
             let (a, mut b) = ws_stream.split();
             conn = Conn {
-                sink: Some(Sink::Wss(SafeWsSink {
+                sink: Arc::new(Mutex::new(Sink::Wss(SafeWsSink {
                     sink: a,
                     encrypt: None,
-                })),
+                }))),
                 rx: None,
                 pending_kx: None,
             };
@@ -1617,10 +1625,10 @@ impl RendezvousServer {
         } else {
             let (a, mut b) = Framed::new(stream, BytesCodec::new()).split();
             conn = Conn {
-                sink: Some(Sink::Tss(SafeTcpStreamSink {
+                sink: Arc::new(Mutex::new(Sink::Tss(SafeTcpStreamSink {
                     sink: a,
                     encrypt: None,
-                })),
+                }))),
                 rx: None,
                 pending_kx: None,
             };
@@ -1640,8 +1648,14 @@ impl RendezvousServer {
                 }
             }
         }
-        if conn.sink.is_none() {
-            self.tcp_punch.lock().await.remove(&try_into_v4(addr));
+        // Forget this connection in the maps that may still point at it. A
+        // newer connection from the same address keeps its own entry.
+        let addr4 = try_into_v4(addr);
+        for map in [&self.tcp_punch, &self.ws_map] {
+            let mut map = map.lock().await;
+            if map.get(&addr4).is_some_and(|s| Arc::ptr_eq(s, &conn.sink)) {
+                map.remove(&addr4);
+            }
         }
         log::debug!("Tcp connection from {:?} closed", addr);
         Ok(())
@@ -1747,7 +1761,7 @@ impl RendezvousServer {
         log::trace!("KeyExchange phase 1 to {:?}, version {}", addr, advertised);
         let mut msg_out = RendezvousMessage::new();
         msg_out.set_key_exchange(ex);
-        Self::send_to_sink(&mut conn.sink, msg_out).await;
+        Self::send_to_sink(&conn.sink, msg_out).await;
         conn.pending_kx = Some(PendingKx {
             sk: kx_sk,
             pk_sent,
