@@ -110,6 +110,11 @@ struct Conn {
     rx: Option<Encrypt>,
     /// The phase-1 secret, until the client's phase 2 consumes it.
     pending_kx: Option<PendingKx>,
+    /// The peer this connection's last punch-hole request was for: the only
+    /// peer its ICE candidates may go to.
+    punched: Option<String>,
+    /// ICE candidates received on this connection, relayed or not.
+    ice_count: usize,
 }
 
 /// The phase-1 half of a key exchange, kept until the client answers.
@@ -161,6 +166,9 @@ static MUST_LOGIN: AtomicBool = AtomicBool::new(false);
 /// split-key scheme below is version 1; a newer hbb_common version needs its
 /// own review before this may go higher.
 static KX_MAX_VERSION: AtomicU32 = AtomicU32::new(1);
+/// Limits on the WebRTC ICE candidates hbbs relays (1.5.0).
+const ICE_MAX_LEN: usize = 1024;
+const ICE_MAX_PER_CONN: usize = 64;
 // Key exchanges since the last summary line, by outcome.
 static KX_V0: AtomicU64 = AtomicU64::new(0);
 static KX_V1: AtomicU64 = AtomicU64::new(0);
@@ -640,6 +648,7 @@ impl RendezvousServer {
                         .lock()
                         .await
                         .insert(try_into_v4(addr), sink.clone());
+                    conn.punched = Some(ph.id.clone());
                     allow_err!(self.handle_tcp_punch_hole_request(addr, ph, key, ws).await);
                     return true;
                 }
@@ -802,6 +811,12 @@ impl RendezvousServer {
                     let mut msg_out = RendezvousMessage::new();
                     msg_out.set_http_proxy_response(resp);
                     Self::send_to_sink(sink, msg_out).await;
+                    return true;
+                }
+                Some(rendezvous_message::Union::IceCandidate(ic)) => {
+                    self.handle_ice_candidate(ic, conn).await;
+                    // Never close on a candidate, even a dropped one: the
+                    // peers fall back to their other transports.
                     return true;
                 }
                 _ => {}
@@ -1286,6 +1301,58 @@ impl RendezvousServer {
         Ok(())
     }
 
+    /// Relays a trickled WebRTC ICE candidate (1.5.0) between the two peers
+    /// of a punch-hole session:
+    /// - from the controller (`id` set) to the peer this connection punched;
+    /// - from the controlled side (`socket_addr` set) to the controller's
+    ///   connection, still in `tcp_punch`.
+    ///
+    /// Only encrypted connections may send them, within ICE_MAX_LEN and
+    /// ICE_MAX_PER_CONN. Returns whether the candidate was relayed.
+    async fn handle_ice_candidate(&mut self, ic: IceCandidate, conn: &mut Conn) -> bool {
+        conn.ice_count += 1;
+        if conn.rx.is_none()
+            || conn.ice_count > ICE_MAX_PER_CONN
+            || ic.candidate.is_empty()
+            || ic.candidate.len() > ICE_MAX_LEN
+            || ic.id.is_empty() == ic.socket_addr.is_empty()
+        {
+            return false;
+        }
+        if !ic.socket_addr.is_empty() {
+            let addr_a = try_into_v4(AddrMangle::decode(&ic.socket_addr));
+            let Some(sink) = self.tcp_punch.lock().await.get(&addr_a).cloned() else {
+                return false;
+            };
+            let mut msg_out = RendezvousMessage::new();
+            msg_out.set_ice_candidate(ic);
+            Self::send_to_sink(&sink, msg_out).await;
+            return true;
+        }
+        if conn.punched.as_deref() != Some(ic.id.as_str()) {
+            return false;
+        }
+        let Some(peer) = self.pm.get_in_memory(&ic.id).await else {
+            return false;
+        };
+        let peer_addr = peer.read().await.socket_addr;
+        let mut msg_out = RendezvousMessage::new();
+        msg_out.set_ice_candidate(ic);
+        let ws_sink = self
+            .ws_map
+            .lock()
+            .await
+            .get(&try_into_v4(peer_addr))
+            .cloned();
+        match ws_sink {
+            Some(sink) => Self::send_to_sink(&sink, msg_out).await,
+            None => {
+                self.tx.send(Data::Msg(msg_out.into(), peer_addr)).ok();
+            }
+        }
+        true
+    }
+
     #[inline]
     async fn handle_udp_punch_hole_request(
         &mut self,
@@ -1625,6 +1692,8 @@ impl RendezvousServer {
                 }))),
                 rx: None,
                 pending_kx: None,
+                punched: None,
+                ice_count: 0,
             };
             while let Ok(Some(Ok(msg))) = timeout(30_000, b.next()).await {
                 if let tungstenite::Message::Binary(bytes) = msg {
@@ -1642,6 +1711,8 @@ impl RendezvousServer {
                 }))),
                 rx: None,
                 pending_kx: None,
+                punched: None,
+                ice_count: 0,
             };
             // Avoid key exchange if answering on nat helper port
             if !key.is_empty() {
