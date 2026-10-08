@@ -173,10 +173,15 @@ const ICE_MAX_PER_CONN: usize = 64;
 static KX_V0: AtomicU64 = AtomicU64::new(0);
 static KX_V1: AtomicU64 = AtomicU64::new(0);
 static KX_FAILED: AtomicU64 = AtomicU64::new(0);
+// WebRTC signalling relayed since the last summary line (1.5.0).
+static WEBRTC_OFFER: AtomicU64 = AtomicU64::new(0);
+static WEBRTC_ANSWER: AtomicU64 = AtomicU64::new(0);
+static WEBRTC_ICE: AtomicU64 = AtomicU64::new(0);
+static WEBRTC_DROPPED: AtomicU64 = AtomicU64::new(0);
 const KX_SUMMARY_INTERVAL: Duration = Duration::from_secs(600);
 
-/// Every KX_SUMMARY_INTERVAL, logs how the key exchanges since the last line
-/// went, skipping intervals without any.
+/// Every KX_SUMMARY_INTERVAL, logs how the key exchanges and the WebRTC
+/// signalling since the last line went, skipping intervals without any.
 fn spawn_kx_summary() {
     tokio::spawn(async {
         let mut timer = interval(KX_SUMMARY_INTERVAL);
@@ -186,8 +191,15 @@ fn spawn_kx_summary() {
             let v1 = KX_V1.swap(0, Ordering::Relaxed);
             let v0 = KX_V0.swap(0, Ordering::Relaxed);
             let failed = KX_FAILED.swap(0, Ordering::Relaxed);
-            if v1 + v0 + failed > 0 {
-                log::info!("key exchange (10 min): v1={v1} v0={v0} failed={failed}");
+            let offer = WEBRTC_OFFER.swap(0, Ordering::Relaxed);
+            let answer = WEBRTC_ANSWER.swap(0, Ordering::Relaxed);
+            let ice = WEBRTC_ICE.swap(0, Ordering::Relaxed);
+            let dropped = WEBRTC_DROPPED.swap(0, Ordering::Relaxed);
+            if v1 + v0 + failed + offer + answer + ice + dropped > 0 {
+                log::info!(
+                    "key exchange (10 min): v1={v1} v0={v0} failed={failed}; \
+                     webrtc offer={offer} answer={answer} ice={ice} dropped={dropped}"
+                );
             }
         }
     });
@@ -700,6 +712,9 @@ impl RendezvousServer {
                             rr.relay_server = self.get_relay_server(addr.ip(), addr_b.ip());
                         }
                     }
+                    if !rr.webrtc_sdp_answer.is_empty() {
+                        WEBRTC_ANSWER.fetch_add(1, Ordering::Relaxed);
+                    }
                     msg_out.set_relay_response(rr);
                     allow_err!(self.send_to_tcp_sync(msg_out, addr_b).await);
                 }
@@ -814,7 +829,12 @@ impl RendezvousServer {
                     return true;
                 }
                 Some(rendezvous_message::Union::IceCandidate(ic)) => {
-                    self.handle_ice_candidate(ic, conn).await;
+                    let counter = if self.handle_ice_candidate(ic, conn).await {
+                        &WEBRTC_ICE
+                    } else {
+                        &WEBRTC_DROPPED
+                    };
+                    counter.fetch_add(1, Ordering::Relaxed);
                     // Never close on a candidate, even a dropped one: the
                     // peers fall back to their other transports.
                     return true;
@@ -1009,6 +1029,9 @@ impl RendezvousServer {
             addr
         );
         let mut msg_out = RendezvousMessage::new();
+        if !phs.webrtc_sdp_answer.is_empty() {
+            WEBRTC_ANSWER.fetch_add(1, Ordering::Relaxed);
+        }
         let mut p = PunchHoleResponse {
             socket_addr: AddrMangle::encode(addr).into(),
             pk: self.get_pk(&phs.version, phs.id).await,
@@ -1212,6 +1235,9 @@ impl RendezvousServer {
                 } else {
                     std::mem::take(&mut ph.webrtc_sdp_offer)
                 };
+                if !webrtc_sdp_offer.is_empty() {
+                    WEBRTC_OFFER.fetch_add(1, Ordering::Relaxed);
+                }
                 msg_out.set_punch_hole(PunchHole {
                     socket_addr,
                     nat_type: ph.nat_type,
